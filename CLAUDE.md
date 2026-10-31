@@ -1,117 +1,130 @@
 # CLAUDE.md — StudySync
 
-Guidance for Claude (and any engineer) working in this repository. Read this first, every session.
+Read this first, every session. It is the standing brief for Claude (and any engineer) working here.
 
 ## Project status
 
-**Phase 0 — Planning.** Design documents exist; **no application code yet**.
-Do **not** scaffold or implement anything until the product owner explicitly approves the
-design (and, later, each phase). The complete product specification is pending; when it
-arrives, reconcile every doc against it (ARCHITECTURE.md §3 lists the open questions Q1–Q20).
+**Design v1.0 FINAL — awaiting the product owner's explicit approval.** No application code
+exists yet. **Do not scaffold or implement anything until approval is given.** After that,
+follow DEVELOPMENT_ROADMAP.md step by step (Phase 0 Spike → 1 Solo → 2 Rooms → 3 Stats →
+4 Polish → 5 Release) and stop for approval at the end of every phase.
 
 ## What StudySync is
 
-A real-time collaborative study app: users study in **reusable rooms**, each with **their own
-independent timer**, share a **real-time task list** per room, and get **daily totals (in
-their timezone)**, **streaks** and **analytics**.
+Students study solo or together in rooms. **Each user runs their own server-verified timer.**
+Rooms are always-on spaces joined by a 6-character code. Members see each other's live status
+(🟢 studying / 🟡 on break with countdown / ⚪ idle / ⚫ offline) and share a task list, but
+**study time is always individual**. Breaks are 5/10/15/30 min and never count. Resume is
+manual and only after the countdown ends. Sessions auto-save after a 2-minute disconnect or 30
+minutes in Break Over. Days are counted in the user's timezone. A streak day needs ≥ 25
+minutes of recorded study.
+
+> **Core rule: your study time is always yours. Rooms give presence and shared tasks — never a shared timer.**
 
 ## Non-negotiable product rules
 
-These are requirements, not suggestions. **Never remove, relax, merge or "simplify" them.**
-If something seems to conflict with a rule, stop and ask the product owner.
+Never remove, relax, merge or "simplify" these. If something seems to conflict with a rule,
+stop and ask.
 
-1. Every user has an **independent timer**.
-2. **Never implement a shared timer** — no room timer, no "start together", no group
-   countdown, no timer fields on `rooms`, no event that changes another user's timer.
-3. **Break time never counts as study time** — study time = Σ `study_segments` only.
-4. Breaks are restricted to **5, 10, 15 and 30 minutes** — nothing else, no extensions.
-5. **No automatic resume** — only a user command can (re)enter `STUDYING`. Break end →
-   `AWAITING_RESUME`; grace expiry → `PAUSED`; reconnect/restart never resumes.
-6. **One active session per user** (DB partial unique index + `409 SESSION_ALREADY_ACTIVE`).
-7. **Rooms are reusable** — persist when empty; membership and tasks persist.
-8. **Room tasks synchronize in real time.**
-9. **Disconnect grace is 2 minutes** (retroactive pause at the disconnect instant if exceeded).
-10. **Idle timeout is 30 minutes** (idle clock suspended during breaks; warning at 25).
-11. **Streak requires 25 minutes (1,500,000 ms) of actual study per local day.**
-12. **All timestamps are stored in UTC** (`timestamptz`, DB/session/process TZ = UTC, ISO `Z`).
-13. **Daily totals use the user's timezone** (split segments at local midnights, DST-safe).
+1. Every user has an **independent timer**. **Never implement a shared timer**: no room timer,
+   no group start or end, no timer columns on `rooms`, no event that changes another user's timer.
+2. States: `STUDYING` → `ON_BREAK` → `BREAK_OVER` → (Resume) → `STUDYING`. End Study from any
+   state. Offline is presence, not a timer state.
+3. **Breaks: 5, 10, 15 or 30 minutes only** (30 max). Take Break only from `STUDYING`.
+4. **Break time never counts as study time.** Study time = Σ `study_segments`, nothing else.
+5. **No automatic resume.** Resume only from `BREAK_OVER` (countdown finished), only by the
+   user. No early resume.
+6. **One ACTIVE session per user, ever** (DB partial unique index). No solo study while in a
+   room, never two rooms. A session lives in one room. A solo session moves into a room on
+   create or join. Room A → room B requires End Study first.
+7. **Disconnect grace = 2 minutes.** Back in time → nothing lost. Otherwise the session ends
+   and saves at the disconnect instant.
+8. **Idle timeout = 30 minutes in `BREAK_OVER`** → the session ends and saves.
+9. **Rooms are reusable.** Membership ≠ presence ≠ session (three separate concepts).
+10. **Room tasks sync in real time.** Only room members can touch them.
+11. **Server is the source of truth.** Clients never send timestamps or durations.
+12. **All timestamps stored in UTC.** **Daily totals use the user's timezone** (split at local midnights).
+13. **Streak = consecutive local days with ≥ 25 min recorded study, computed from history.**
+    Never store a counter.
+14. Room codes: 6 chars from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no O/0/I/1), unique.
 
-The canonical values live in `packages/shared/src/constants.ts` (once scaffolded) — never
-hard-code them elsewhere, never make them env-configurable.
+Canonical values live in `packages/shared/src/constants.ts`: never hard-coded elsewhere,
+never env-configurable.
+
+**Not building:** video, voice, chat, file or screen sharing, AI, notes, music, calendar,
+friends, public communities, leaderboards. Open product gaps (D-1…D-5 in ARCHITECTURE §5) are
+**not** in scope until approved.
 
 ## Document map
 
-| Doc | Read when |
+| Doc | Use it for |
 |---|---|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Always. Requirements analysis, open questions, timer state machine (§9), risks (§13–14), folder structure (§15). |
-| [DATABASE_DESIGN.md](./DATABASE_DESIGN.md) | Touching schema, queries, migrations. |
-| [API_DESIGN.md](./API_DESIGN.md) | Adding/changing endpoints or socket events. |
-| [DEVELOPMENT_ROADMAP.md](./DEVELOPMENT_ROADMAP.md) | Deciding what to build next; phase exit criteria. |
-| [TESTING_STRATEGY.md](./TESTING_STRATEGY.md) | Writing tests; Definition of Done (§11). |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Spec coverage (§2), rules → enforcement (§3), interpretations (§4), open gaps (§5), edge cases (§6), membership/presence/session (§11), **timer state machine + transition table (§13)**, timezones (§14), security (§17), risks (§18) |
+| [DATABASE_DESIGN.md](./DATABASE_DESIGN.md) | Schema, hand-written constraints, validated time-split SQL, audit queries |
+| [API_DESIGN.md](./API_DESIGN.md) | REST endpoints, socket events (spec names), error codes, authorization matrix |
+| [DEVELOPMENT_ROADMAP.md](./DEVELOPMENT_ROADMAP.md) | Step-by-step build plan, acceptance criteria per phase |
+| [TESTING_STRATEGY.md](./TESTING_STRATEGY.md) | Test layers, IDs, DST matrix, Definition of Done, release checklist |
 
-**Docs are part of the change:** if code diverges from a doc, update the doc in the same commit.
-
-## Stack
-
-React + TypeScript + Vite, Tailwind CSS, Recharts · Node.js + Express + TypeScript ·
-PostgreSQL + Prisma · Socket.IO · JWT + bcrypt · Zod. Supporting libraries proposed in
-ARCHITECTURE §5.2 (pending approval). npm-workspaces monorepo: `apps/web`, `apps/server`,
-`packages/shared`, `e2e`.
+Code and docs change together. If code diverges from a doc, update the doc in the same commit.
 
 ## Architecture rules (enforced in review)
 
-- **Server-authoritative time.** Clients never send timestamps or durations. Use the injected
-  `Clock`; never call `Date.now()`/`new Date()` in domain code.
-- **Pure timer machine** (`packages/shared/src/timer`): `transition(state, event) → {state, effects}`.
-  No I/O. Every state × event pair is covered by the exhaustive table test.
-- **Deadlines are data.** Break end / grace / idle are persisted; `reconcile()` applies due
-  transitions *stamped at their deadline*, before every command and read. Timers are only an
-  optimization.
-- **Single write path:** mutations via REST; Socket.IO for push, presence, activity.
-- **Emit after commit** only (EventCollector). Every pushed entity carries a `version`.
-- **Validate every boundary** with shared Zod schemas (`.strict()`): HTTP, socket payloads, env, forms.
-- **Authorization in services**, scoped queries; unauthorized resource → `404`.
-- **DB constraints are the last line of defense** — partial unique indexes, CHECK, EXCLUDE
-  (hand-written SQL in migrations; never let a generated migration drop them).
-- Timezone math only in `packages/shared/src/time` (Luxon). Durations are integer **ms**.
-- No `$queryRawUnsafe`, no `dangerouslySetInnerHTML`, no tokens in `localStorage`.
+- **Pure timer core** (`packages/shared/src/timer`): `phaseOf()`, `decide()`, `dueAutoSave()`.
+  No I/O and no `Date.now()`. The exhaustive phase × event table test must stay complete.
+- **Phase is derived**, not stored: STUDYING iff `current_segment_started_at`; otherwise
+  ON_BREAK until `break_ends_at`, then BREAK_OVER.
+- **Deadlines are data.** Reconcile before every command and read; auto-saves are stamped at
+  the deadline instant. Timers and the sweeper are just triggers.
+- **Socket.IO for commands** (`start_study`, `take_break`, `resume_study`, `end_study`,
+  `set_session_task`, `join_room`, `leave_room`, `task_*`). **REST** for auth, room
+  create/join, reads and stats. One shared service layer.
+- **Per-user serialization:** an in-process queue + `pg_advisory_xact_lock(user)` + row lock
+  for every session mutation, including the sweeper (`pg_try_advisory_xact_lock` + `SKIP LOCKED`).
+- **Liveness:** solo session = any socket; room session = present in that room.
+- **No stored counters.** Totals, streaks and summaries are SQL over segments, with the
+  timezone snapshot per segment.
+- **Emit after commit.** Every push carries a `version` or is a full snapshot.
+- **Validate every boundary** with shared Zod `.strict()` schemas. Authorization lives in
+  services; foreign resources → 404.
+- **DB constraints are the last line of defense.** Hand-written SQL in migrations; never let
+  a generated migration drop it (`INT-SCHEMA` guards this).
+- Banned: `$queryRawUnsafe`, `dangerouslySetInnerHTML`, tokens in `localStorage`, SQL `now()`
+  in time logic (pass `$now` from the injected `Clock`).
 
 ## Conventions
 
-- TypeScript `strict` (+ `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`). No `any`
-  without a justifying comment.
-- Server modules: `*.routes.ts → *.controller.ts → *.service.ts → *.repository.ts`.
-- DB: `snake_case` tables/columns via `@map`; named constraints/indexes.
-- API: `/api/v1`, error envelope `{ error: { code, message, details?, requestId } }`, UTC ISO
-  instants, `YYYY-MM-DD` local dates, `*Ms` durations.
-- Socket events: `domain:action` (e.g. `session:state`, `task:created`), ack `{ ok, data | error }`.
-- Commits: imperative, scoped (`feat(sessions): …`, `test(accounting): …`, `docs: …`).
+- TypeScript strict (+ `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`).
+- Server modules: `*.routes.ts → *.controller.ts → *.service.ts → *.repository.ts`, plus
+  `*.socket.ts` handlers.
+- DB: `snake_case` via `@map`; named constraints. API: `/api/v1`, UTC ISO instants with `Z`,
+  `YYYY-MM-DD` local dates, `…Ms` durations.
+- Socket events: **snake_case, exact spec names** (`join_room`, `status_changed`, …), acks
+  `{ ok, data | error }`.
+- Commits: `feat(sessions): …`, `test(rooms): …`, `docs: …`. Small and frequent.
 
 ## Cloud development environment
 
-The product owner develops **only** in the Claude Code cloud container — never ask them to
-install tools locally.
+The product owner works **only** in the Claude Code cloud container. Never ask them to install
+tools locally.
 
-- Available: Node 22, npm 10, PostgreSQL 16 (cluster `16/main`, **stopped by default** —
-  start with `scripts/dev-db.sh` once it exists, or `sudo pg_ctlcluster 16 main start`),
-  Chromium + Playwright pre-installed (**do not run `playwright install`**). Docker daemon is
-  not running.
-- The container is **ephemeral**: commit and push work frequently; the DB is disposable
+- Node 22, npm 10, PostgreSQL 16 (cluster `16/main`, stopped by default; start it with
+  `scripts/dev-db.sh` once it exists, or `pg_ctlcluster 16 main start`), Chromium +
+  Playwright pre-installed (**never run `playwright install`**). The Docker daemon is not running.
+- The container is **ephemeral**: commit and push after every step. The DB is disposable
   (`npm run db:reset`).
-- Show progress via test results and Playwright screenshots/recordings until a hosted preview
-  exists (DEVELOPMENT_ROADMAP §5).
+- Show progress with test reports and Playwright screenshots or recordings until a hosted
+  preview exists.
 
 ## Commands
 
-*Not available yet — defined in Phase 1.* Planned root scripts: `dev`, `build`, `lint`,
-`typecheck`, `test`, `test:integration`, `test:e2e`, `db:migrate`, `db:reset`, `db:seed`.
+Defined in Phase 0 (step 0.1). Planned: `dev`, `build`, `lint`, `typecheck`, `test`,
+`test:integration`, `test:e2e`, `db:migrate`, `db:reset`, `db:seed`.
 
 ## Workflow
 
-1. Confirm the current phase and that it is approved (DEVELOPMENT_ROADMAP.md).
-2. Re-read the relevant rules and design sections before changing timer, accounting,
-   presence, or auth code.
-3. Write tests with the code (TESTING_STRATEGY §11 Definition of Done).
-4. Run lint, typecheck, and the affected test suites before committing.
-5. Commit to the designated branch and push; never push to `main` directly.
-6. End each phase with a summary + demo and **wait for approval**.
+1. Confirm the current phase and step are approved (DEVELOPMENT_ROADMAP.md).
+2. Re-read the rules above and ARCHITECTURE §13 before touching timer, presence or accounting code.
+3. Write tests with the code (TESTING_STRATEGY §10).
+4. Run lint, typecheck and the affected suites before committing.
+5. Commit to the designated feature branch and push. Never push to `main` directly.
+6. At each phase end: summary + demo + **wait for approval**.

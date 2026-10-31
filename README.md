@@ -1,10 +1,13 @@
 # StudySync
 
-A real-time collaborative study application: study in reusable rooms alongside others, each
-with your **own independent timer**, share a live task list, and track daily study time,
-streaks and analytics.
+A study platform where students track tasks, run their own study timer with controlled
+breaks, and build streaks — solo, or together in shared rooms where everyone sees each other's
+status but studies at their own pace.
 
-> **Status:** Phase 0 — planning. Design documents only; implementation starts after approval.
+> *Your study time is always yours. Rooms give presence and shared tasks — never a shared timer.*
+
+> **Status:** Design v1.0 final (reconciled with the final spec), awaiting approval.
+> Implementation starts with the Phase 0 spike after approval.
 
 ## Documentation
 

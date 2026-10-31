@@ -1,9 +1,10 @@
 # StudySync — API Design (REST + Socket.IO)
 
-> **Status: Draft v0.1 (planning phase).** All request and response shapes will be implemented
-> as **Zod schemas in `packages/shared/src/schemas`**, and TypeScript types will be inferred from
-> them. Server and client therefore share one contract. Items tagged **[Qn]** refer to
-> [ARCHITECTURE.md §3](./ARCHITECTURE.md#3-assumptions--open-questions).
+> **Status: v1.0 FINAL — reconciled with the final spec. Awaiting approval.**
+> Request and response shapes become Zod schemas in `packages/shared/src/schemas`, with event
+> maps in `packages/shared/src/realtime/events.ts`. Server and client share one contract.
+> The spec's §8 socket events are used **with their exact names**. Additions are marked **(+)**.
+> IDs like I-xx, D-x and R-x refer to [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
@@ -12,18 +13,14 @@
 1. [Conventions](#1-conventions)
 2. [Shared types](#2-shared-types)
 3. [Errors](#3-errors)
-4. [Endpoint summary](#4-endpoint-summary)
-5. [Auth](#5-auth)
-6. [Users](#6-users)
-7. [Rooms & membership](#7-rooms--membership)
-8. [Room tasks](#8-room-tasks)
-9. [Study sessions (timer)](#9-study-sessions-timer)
-10. [Stats](#10-stats)
-11. [Health & test-only](#11-health--test-only)
-12. [Socket.IO contract](#12-socketio-contract)
-13. [Realtime flows](#13-realtime-flows)
-14. [Rate limits](#14-rate-limits)
-15. [Authorization matrix](#15-authorization-matrix)
+4. [REST endpoint list](#4-rest-endpoint-list)
+5. [REST details](#5-rest-details)
+6. [Socket.IO connection](#6-socketio-connection)
+7. [Client → server events](#7-client--server-events)
+8. [Server → client events](#8-server--client-events)
+9. [Realtime flows](#9-realtime-flows)
+10. [Rate limits](#10-rate-limits)
+11. [Authorization matrix](#11-authorization-matrix)
 
 ---
 
@@ -31,22 +28,17 @@
 
 | Topic | Rule |
 |---|---|
-| Base URL | `/api/v1` (same origin as the web app; Vite proxies it in development). |
-| Format | JSON (`Content-Type: application/json`). Bodies are limited to 100 KB. |
-| Authentication | `Authorization: Bearer <accessToken>` on every endpoint except `register`, `login`, `refresh`, `logout` and `health`. |
-| CSRF | Endpoints that read the refresh cookie (`/auth/refresh`, `/auth/logout`) require the header `X-StudySync-CSRF: 1`. |
-| IDs | UUID strings. |
-| Instants | ISO-8601 **UTC** with `Z` and milliseconds, e.g. `2026-10-31T18:00:00.000Z` (R12). The API rejects offsets other than `Z`. |
-| Local dates | `YYYY-MM-DD` strings, interpreted in the user's timezone (R13). |
-| Durations | Integer milliseconds, with a `Ms` suffix. |
-| Validation | Zod `.strict()` objects. Unknown keys → `400 VALIDATION_ERROR`. |
-| Pagination | Cursor-based: `?limit=20&cursor=<opaque>` → `{ items: T[], nextCursor: string \| null }`. `limit` ≤ 100. |
-| Timer command idempotency | Every timer command body carries `commandId: UUID` (client-generated, one per user intent). A replay returns the current state with header `Idempotent-Replayed: true`. |
-| Task create idempotency | The client supplies the task `id` (UUID v4). Replaying the same create returns the existing task. |
-| Optimistic concurrency | `expectedVersion` (optional for timer commands, required for task text edits and moves). A mismatch returns `409 VERSION_CONFLICT` with the current entity. |
-| Server time | Timer-related responses include `serverNow` so the client can correct clock skew. |
-| Request id | Every response carries `X-Request-Id`, which is also included in error bodies. |
-| Rate limits | `RateLimit-*` headers (draft-7). `429 RATE_LIMITED` includes `Retry-After`. |
+| Base URL | `/api/v1` (same origin as the web app; Vite proxies it in development) |
+| Auth | REST: `Authorization: Bearer <accessToken>`. Socket: `auth.token` in the handshake. |
+| CSRF | `/auth/refresh` and `/auth/logout` (cookie-based) require `X-StudySync-CSRF: 1` |
+| Instants | ISO-8601 **UTC with `Z`**, millisecond precision. Instants from clients are never accepted for timer logic. |
+| Local dates | `YYYY-MM-DD` in the user's timezone |
+| Durations | Integer milliseconds, `…Ms` suffix |
+| Validation | Zod `.strict()`. Unknown keys → `VALIDATION_ERROR` |
+| Pagination | `?limit=20&cursor=<opaque>` → `{ items, nextCursor }`, limit ≤ 100 |
+| Timer commands | Socket only. Each carries `commandId` (UUID, idempotent) and, except `start_study`, `sessionId` (I-20). |
+| Server time | Every session payload carries `serverNow` (client clock-offset correction) |
+| Versions | Session and task payloads carry `version`. Clients drop anything older than what they hold. |
 
 ---
 
@@ -54,589 +46,418 @@
 
 ```ts
 type UUID = string;
-type Instant = string;            // "2026-10-31T18:00:00.000Z"
-type LocalDate = string;          // "2026-10-31"
-type BreakMinutes = 5 | 10 | 15 | 30;                  // R4 — the only legal values
-type SessionStatus = 'STUDYING' | 'PAUSED' | 'ON_BREAK' | 'AWAITING_RESUME' | 'ENDED';
-type RoomRole = 'OWNER' | 'MODERATOR' | 'MEMBER';
-type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'DONE';
+type Instant = string;                 // "2026-10-31T18:00:00.000Z"
+type LocalDate = string;               // "2026-10-31"
+type BreakMinutes = 5 | 10 | 15 | 30;  // R4
+type Phase = 'STUDYING' | 'ON_BREAK' | 'BREAK_OVER';
+type RoomStatus = 'STUDYING' | 'ON_BREAK' | 'IDLE' | 'OFFLINE';
+type EndReason = 'USER' | 'DISCONNECTED' | 'IDLE_TIMEOUT';
 
-interface UserDto {
-  id: UUID; email: string; displayName: string;
-  timezone: string;               // IANA, e.g. "Asia/Kolkata"
-  createdAt: Instant;
+interface UserDto { id: UUID; name: string; email: string; timezone: string; createdAt: Instant }
+interface UserRef { id: UUID; name: string }
+
+/** The caller's own active session. Never describes anyone else's timer (R1/R2). */
+interface SessionDto {
+  id: UUID;
+  phase: Phase;                          // derived at serverNow
+  version: number;
+  roomId: UUID | null; roomName: string | null;       // null = solo
+  task: { id: UUID; title: string } | null;
+  startedAt: Instant;
+  studyMsClosed: number;                 // Σ closed segments
+  currentSegmentStartedAt: Instant | null;            // non-null iff STUDYING
+  break: { durationMinutes: BreakMinutes; startedAt: Instant; endsAt: Instant } | null; // ON_BREAK or BREAK_OVER
+  disconnectedAt: Instant | null;        // non-null while in disconnect grace
+  autoSaveAt: Instant | null;            // grace: disconnectedAt+2m · BREAK_OVER: endsAt+30m · else null
+}
+// Client display (never authoritative):
+//   elapsed   = studyMsClosed + (phase === 'STUDYING' ? correctedNow − currentSegmentStartedAt : 0)
+//   countdown = break.endsAt − correctedNow            (ON_BREAK)
+//   Resume enabled only when correctedNow ≥ break.endsAt
+
+interface AutoSavedNotice {             // drives the saved-session toast (F-40)
+  sessionId: UUID; endReason: 'DISCONNECTED' | 'IDLE_TIMEOUT'; endedAt: Instant; studiedMs: number;
 }
 
-interface PublicUserDto { id: UUID; displayName: string }
+interface SessionStatePayload {
+  session: SessionDto | null;
+  cause: SessionCause;
+  lastAutoSaved: AutoSavedNotice | null; // unseen system-ended session, if any
+  serverNow: Instant;
+}
+type SessionCause =
+  | 'CONNECT' | 'SYNC'
+  | 'START' | 'BREAK' | 'BREAK_OVER' | 'RESUME' | 'END' | 'MOVED_TO_ROOM' | 'TASK_SET'
+  | 'DISCONNECTED' | 'RECONNECTED' | 'AUTO_SAVED_DISCONNECT' | 'AUTO_SAVED_IDLE';
 
 interface RoomDto {
-  id: UUID; name: string; description: string | null;
-  visibility: 'PUBLIC' | 'PRIVATE';
-  inviteCode: string | null;      // only for OWNER / MODERATOR, null otherwise
-  owner: PublicUserDto;
-  maxMembers: number; memberCount: number;
-  myRole: RoomRole | null;        // null = not a member (public preview)
-  createdAt: Instant; archivedAt: Instant | null;
+  id: UUID; name: string; code: string;  // e.g. "DSA7K2"
+  createdBy: UserRef; isCreator: boolean;
+  memberCount: number; createdAt: Instant;
 }
 
-interface RoomMemberDto { user: PublicUserDto; role: RoomRole; joinedAt: Instant }
+/** What other members see (§11.4 of ARCHITECTURE). */
+interface MemberStatusDto {
+  user: UserRef;
+  status: RoomStatus;
+  breakEndsAt: Instant | null;           // ON_BREAK → viewer renders "On Break 08:42"
+  reconnecting: boolean;                 // in the 2-min display grace (I-19)
+  version: number;
+}
 
 interface TaskDto {
-  id: UUID; roomId: UUID;
-  title: string;                  // 1–200 chars
-  notes: string | null;           // ≤ 2000 chars
-  status: TaskStatus;
-  position: string;               // opaque ordering key; sort ascending by byte order
+  id: UUID; roomId: UUID | null;         // null = personal
+  title: string; description: string | null;
+  status: 'TODO' | 'DONE'; dueDate: LocalDate | null;
   version: number;
-  createdBy: PublicUserDto; updatedBy: PublicUserDto;
-  completedBy: PublicUserDto | null; completedAt: Instant | null;
+  createdBy: UserRef; completedBy: UserRef | null; completedAt: Instant | null;
   createdAt: Instant; updatedAt: Instant;
 }
 
-/** The authoritative state of the caller's own timer. Never describes anyone else's timer. */
-interface SessionStateDto {
-  id: UUID;
-  status: SessionStatus;
-  version: number;                // strictly increasing; clients drop older versions
-  roomId: UUID | null;
-  startedAt: Instant;
-  endedAt: Instant | null;
-  endReason: 'USER' | 'IDLE_TIMEOUT' | 'ACCOUNT_DELETED' | null;
-  statusSince: Instant;
-  pauseReason: 'USER' | 'DISCONNECT_GRACE_EXPIRED' | null;
-  studyMsClosed: number;                       // closed segments only
-  currentSegmentStartedAt: Instant | null;     // non-null iff STUDYING
-  breakMsClosed: number;
-  currentBreak: {                              // non-null iff ON_BREAK
-    durationMinutes: BreakMinutes; startedAt: Instant; endsAt: Instant;
-  } | null;
-  connection: { disconnectedAt: Instant | null; graceExpiresAt: Instant | null };
-  idle: { deadlineAt: Instant | null; warningAt: Instant | null };   // null while ON_BREAK / ENDED
-  today: {
-    localDate: LocalDate;
-    studyMsClosed: number;        // persisted daily total (excludes the open segment)
-    thresholdMs: 1500000;         // R11
-  };
-  serverNow: Instant;
-}
-// Client display (never authoritative):
-//   elapsedStudyMs = studyMsClosed + (STUDYING ? correctedNow − currentSegmentStartedAt : 0)
-//   todayStudyMs   = today.studyMsClosed + portion of open segment since local midnight
-//   breakRemaining = currentBreak.endsAt − correctedNow
-
-type SessionCause =
-  | 'START' | 'PAUSE' | 'RESUME' | 'START_BREAK' | 'END' | 'CHANGE_ROOM'          // user
-  | 'BREAK_ELAPSED' | 'GRACE_EXPIRED' | 'IDLE_TIMEOUT'                              // system
-  | 'DISCONNECTED' | 'RECONNECTED' | 'LEASE_LOST' | 'SYNC';
-
-/** What room members see about each other [Q11]. A read-only view of independent timers (R1/R2). */
-interface MemberStatusDto {
-  user: PublicUserDto;
-  role: RoomRole;
-  connection: 'online' | 'reconnecting';
-  timer: {
-    status: SessionStatus | 'NO_SESSION';
-    since: Instant | null;
-    currentSegmentStartedAt: Instant | null;   // lets the viewer render this member's own elapsed time
-    breakEndsAt: Instant | null;
-  };
-  todayStudyMsClosed: number;
-  version: number;                             // presence-entry version for ordering
+interface TodayInRoomDto {
+  roomId: UUID; serverNow: Instant;
+  members: { user: UserRef; todayMs: number; studyingSince: Instant | null }[];  // I-09
 }
 
 interface SessionSummaryDto {
-  id: UUID; roomId: UUID | null; roomName: string | null;
-  status: SessionStatus; startedAt: Instant; endedAt: Instant | null;
-  endReason: SessionStateDto['endReason'];
-  studyMs: number; breakMs: number;
+  id: UUID; startedAt: Instant; endedAt: Instant | null; endReason: EndReason | null;  // null while active
+  studiedMs: number;
+  breaks: { count: number; totalMs: number };                                  // I-12
+  where: { roomId: UUID | null; roomName: string | null; movedFromSolo: boolean };
+  task: { id: UUID; title: string } | null;
+  completedTasks: { id: UUID; title: string }[];                               // I-13
 }
 
-interface SessionDetailDto extends SessionSummaryDto {
-  segments: { id: UUID; roomId: UUID | null; startedAt: Instant; endedAt: Instant | null; durationMs: number | null; endReason: string | null }[];
-  breaks:   { id: UUID; durationMinutes: BreakMinutes; startedAt: Instant; scheduledEndAt: Instant; endedAt: Instant | null; actualMs: number | null; endReason: string | null }[];
-  events:   { type: string; actor: 'USER' | 'SYSTEM'; occurredAt: Instant; fromStatus: SessionStatus | null; toStatus: SessionStatus }[];
-}
+interface TodayDto { localDate: LocalDate; timezone: string; soloMs: number; roomsMs: number; totalMs: number;
+                     thresholdMs: 1500000; qualified: boolean; serverNow: Instant }
+interface StreakDto { current: number; longest: number; currentStart: LocalDate | null;
+                      lastQualifiedDate: LocalDate | null; todayQualified: boolean; todayMs: number;
+                      thresholdMs: 1500000; atRisk: boolean }
 ```
 
 ---
 
 ## 3. Errors
 
-Envelope (HTTP and socket acks):
+REST: `{ "error": { "code", "message", "details"?, "requestId" } }`.
+Socket ack: `{ "ok": false, "error": { "code", "message", "details"? } }`.
 
-```json
-{ "error": { "code": "INVALID_TRANSITION", "message": "Cannot start a break while PAUSED.", "details": { "current": { "...": "SessionStateDto" } }, "requestId": "b6f1…" } }
-```
-
-| HTTP | Code | When |
+| Code | HTTP | When |
 |---|---|---|
-| 400 | `VALIDATION_ERROR` | Zod failure. `details.issues[]` lists `{ path, message }`. |
-| 400 | `INVALID_TIMEZONE` | Not a valid IANA zone. |
-| 401 | `UNAUTHENTICATED` | Missing or invalid bearer token. |
-| 401 | `TOKEN_EXPIRED` | The access token expired. The client refreshes and retries once. |
-| 401 | `INVALID_CREDENTIALS` | Login failed (uniform message). |
-| 401 | `REFRESH_INVALID` | Missing, expired or revoked refresh token. The cookie is cleared. |
-| 401 | `REFRESH_REUSED` | A rotated token was reused. The family is revoked. |
-| 403 | `CSRF_REQUIRED` | Missing CSRF header on cookie endpoints. |
-| 403 | `FORBIDDEN` | Member lacks the role for this action (only when membership is already known to the caller). |
-| 404 | `NOT_FOUND` | Missing **or not visible to the caller** (no existence leaks). |
-| 404 | `INVITE_INVALID` | Unknown invite code. |
-| 409 | `EMAIL_TAKEN` | Registration with an existing email. |
-| 409 | `SESSION_ALREADY_ACTIVE` | `POST /sessions` while a non-ended session exists. `details.session` holds it (R6). |
-| 409 | `INVALID_TRANSITION` | The command is not legal from the current state. `details.current` holds the state. |
-| 409 | `SESSION_ENDED` | Command on an ended session. |
-| 409 | `VERSION_CONFLICT` | `expectedVersion` mismatch. `details.current` holds the entity. |
-| 409 | `ROOM_FULL` | Capacity reached. |
-| 409 | `ROOM_ARCHIVED` | Mutation on an archived room. |
-| 409 | `OWNER_MUST_TRANSFER` | The owner tried to leave. |
-| 409 | `ID_CONFLICT` | A client-supplied task id already exists with different content. |
-| 409 | `TASK_LIMIT_REACHED` | The room already has the maximum number of live tasks. |
-| 410 | `TASK_DELETED` | Edit or move of a deleted task. |
-| 413 | `PAYLOAD_TOO_LARGE` | Body exceeds the limit. |
-| 429 | `RATE_LIMITED` | See §14. |
-| 500 | `INTERNAL` | Unexpected error (no internals exposed). |
+| `VALIDATION_ERROR` | 400 | Zod failure, including a break duration ∉ {5,10,15,30} |
+| `INVALID_TIMEZONE` | 400 | Not an IANA zone |
+| `UNAUTHENTICATED` / `TOKEN_EXPIRED` | 401 | Missing or invalid / expired access token |
+| `INVALID_CREDENTIALS` | 401 | Login failed (uniform) |
+| `REFRESH_INVALID` / `REFRESH_REUSED` | 401 | Bad refresh token / reused rotated token (family revoked) |
+| `CSRF_REQUIRED` | 403 | Missing CSRF header |
+| `FORBIDDEN` | 403 | Member lacks the right (deleting someone else's room task) |
+| `NOT_FOUND` | 404 | Missing **or not visible to the caller** (no existence leaks) |
+| `INVALID_CODE` | 404 | Unknown room code (uniform for brute-force resistance) |
+| `EMAIL_TAKEN` | 409 | Registration conflict |
+| `ROOM_FULL` | 409 | 50 members reached (D-3) |
+| `SESSION_ALREADY_ACTIVE` | 409 | `start_study` while a session is active (R6). `details.session` holds it. |
+| `NO_ACTIVE_SESSION` | 409 | Command but no active session (e.g. it was just auto-saved) |
+| `STALE_SESSION` | 409 | `sessionId` is not the active session (I-20) |
+| `NOT_STUDYING` | 409 | `take_break` outside `STUDYING` |
+| `BREAK_NOT_OVER` | 409 | `resume_study` during `ON_BREAK`. `details.breakEndsAt` (R5, I-05). |
+| `NOT_ON_BREAK` | 409 | `resume_study` while `STUDYING` |
+| `MUST_START_IN_CURRENT_ROOM` | 409 | `start_study` with a `roomId` different from the user's current room presence (I-07) |
+| `NOT_IN_SESSION_ROOM` | 409 | `resume_study` for a room session from a socket not in that room |
+| `SESSION_IN_OTHER_ROOM` | 409 | Join or enter another room while the session lives in room A (I-06). `details.roomName`. |
+| `TASK_NOT_ATTACHABLE` | 409 | Task is not yours or not in the session's room (I-17) |
+| `VERSION_CONFLICT` | 409 | `task_update` with a stale `expectedVersion`. `details.current` holds the task. |
+| `TASK_LIMIT_REACHED` | 409 | 500 room tasks / 1,000 personal tasks |
+| `RATE_LIMITED` | 429 | See §10. `Retry-After` header / `details.retryAfterMs`. |
+| `INTERNAL` | 500 | Unexpected (no internals leaked) |
+
+Every session-related rejection includes `details.session` (the current `SessionDto` or
+`null`), so the client can resync immediately.
 
 ---
 
-## 4. Endpoint summary
+## 4. REST endpoint list
 
-| Method | Path | Auth | Purpose |
+| # | Method | Path | Auth | Purpose | Phase |
+|---|---|---|---|---|---|
+| 1 | POST | `/auth/register` | — | Create account (timezone auto-detected) | 1 |
+| 2 | POST | `/auth/login` | — | Log in | 1 |
+| 3 | POST | `/auth/refresh` | cookie + CSRF | New access token, rotated refresh cookie | 1 |
+| 4 | POST | `/auth/logout` | cookie + CSRF | Revoke refresh family | 1 |
+| 5 | GET | `/users/me` | bearer | Profile | 1 |
+| 6 | PATCH | `/users/me` | bearer | Edit name, timezone | 1 |
+| 7 | GET | `/tasks` | bearer | My personal tasks | 1 |
+| 8 | GET | `/sessions/current` | bearer | Active session + unseen auto-save (refresh-proof fallback) | 0 |
+| 9 | GET | `/sessions` | bearer | Session history (paginated) | 1 |
+| 10 | GET | `/sessions/:sessionId/summary` | owner | End-of-session summary | 1 |
+| 11 | POST | `/sessions/:sessionId/summary-seen` | owner | Acknowledge the auto-save toast | 2 |
+| 12 | GET | `/stats/today` | bearer | TODAY: Solo / Rooms / Total | 1 |
+| 13 | GET | `/stats/daily` | bearer | Per-day totals for a range | 1 |
+| 14 | GET | `/stats/streak` | bearer | Current / longest streak | 3 |
+| 15 | GET | `/stats/periods` | bearer | Weekly / monthly totals | 3 |
+| 16 | GET | `/stats/heatmap` | bearer | Weekday × hour heatmap | 4 |
+| 17 | GET | `/rooms` | bearer | My Rooms | 2 |
+| 18 | POST | `/rooms` | bearer | Create room (code generated) | 2 |
+| 19 | POST | `/rooms/join` | bearer | Join by code (membership) | 2 |
+| 20 | GET | `/rooms/:roomId` | member | Room details | 2 |
+| 21 | GET | `/rooms/:roomId/members` | member | All members with live status | 2 |
+| 22 | GET | `/rooms/:roomId/tasks` | member | Room tasks | 2 |
+| 23 | GET | `/rooms/:roomId/today` | member | Today in this room | 2 |
+| 24 | GET | `/rooms/:roomId/history` | member | Room history page (per day, per member) | 4 |
+| 25 | GET | `/health` | — | Liveness | 0 |
+| 26 | GET | `/health/ready` | — | Readiness (DB) | 0 |
+| — | POST | `/__test__/clock` | test only | Fast-forward server clock (E2E). Absent unless `NODE_ENV=test` and `ENABLE_TEST_CLOCK=true`. | 0 |
+
+All **mutations of sessions, presence and tasks are socket events** (§7). REST mutations are
+limited to auth, profile, room creation, join by code and acknowledging a summary.
+
+---
+
+## 5. REST details
+
+### Auth
+
+| Endpoint | Body | Success | Errors |
 |---|---|---|---|
-| POST | `/auth/register` | — | Create account |
-| POST | `/auth/login` | — | Log in |
-| POST | `/auth/refresh` | cookie + CSRF | Rotate refresh token, new access token |
-| POST | `/auth/logout` | cookie + CSRF | Revoke current token family |
-| POST | `/auth/logout-all` | bearer | Revoke all sessions on all devices |
-| GET | `/users/me` | bearer | Profile |
-| PATCH | `/users/me` | bearer | Update display name / timezone |
-| PUT | `/users/me/password` | bearer | Change password |
-| DELETE | `/users/me` | bearer | Delete account |
-| GET | `/rooms` | bearer | My rooms |
-| GET | `/rooms/discover` | bearer | Public rooms |
-| POST | `/rooms` | bearer | Create room |
-| GET | `/rooms/:roomId` | bearer | Room details |
-| PATCH | `/rooms/:roomId` | owner/mod | Edit room |
-| POST | `/rooms/:roomId/archive` | owner | Archive room |
-| POST | `/rooms/:roomId/restore` | owner | Restore archived room |
-| POST | `/rooms/join` | bearer | Join by invite code |
-| POST | `/rooms/:roomId/join` | bearer | Join public room |
-| POST | `/rooms/:roomId/leave` | member | Leave room (membership) |
-| POST | `/rooms/:roomId/invite-code/rotate` | owner/mod | New invite code |
-| POST | `/rooms/:roomId/transfer-ownership` | owner | Transfer ownership |
-| GET | `/rooms/:roomId/members` | member | Members list |
-| PATCH | `/rooms/:roomId/members/:userId` | owner | Change role |
-| DELETE | `/rooms/:roomId/members/:userId` | owner/mod | Remove member |
-| GET | `/rooms/:roomId/presence` | member | Presence snapshot |
-| GET | `/rooms/:roomId/tasks` | member | Task list |
-| POST | `/rooms/:roomId/tasks` | member | Create task |
-| PATCH | `/rooms/:roomId/tasks/:taskId` | member | Edit task |
-| POST | `/rooms/:roomId/tasks/:taskId/move` | member | Reorder task |
-| DELETE | `/rooms/:roomId/tasks/:taskId` | creator/mod/owner | Delete task |
-| GET | `/sessions/active` | bearer | My current timer state |
-| POST | `/sessions` | bearer | **START** |
-| POST | `/sessions/:sessionId/pause` | owner of session | **PAUSE** |
-| POST | `/sessions/:sessionId/resume` | owner of session | **RESUME** |
-| POST | `/sessions/:sessionId/breaks` | owner of session | **START_BREAK** (5/10/15/30) |
-| POST | `/sessions/:sessionId/end` | owner of session | **END** |
-| PUT | `/sessions/:sessionId/room` | owner of session | **CHANGE_ROOM** |
-| POST | `/sessions/:sessionId/activity` | owner of session | Activity (REST fallback) |
-| GET | `/sessions` | bearer | Session history |
-| GET | `/sessions/:sessionId` | owner of session | Session detail |
-| GET | `/stats/today` | bearer | Today's totals |
-| GET | `/stats/daily` | bearer | Daily series |
-| GET | `/stats/summary` | bearer | Period summary |
-| GET | `/stats/streak` | bearer | Streak |
-| GET | `/stats/hourly` | bearer | Time-of-day heatmap |
-| GET | `/stats/rooms` | bearer | Per-room breakdown |
-| GET | `/health` | — | Liveness |
-| GET | `/health/ready` | — | Readiness |
+| `POST /auth/register` | `{ name (1–50), email (≤254, lower-cased), password (10–72 bytes), timezone (IANA) }` | `201 { user, accessToken, accessTokenExpiresAt }` + `Set-Cookie: ss_refresh=…; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth` | `VALIDATION_ERROR`, `INVALID_TIMEZONE`, `EMAIL_TAKEN`, `RATE_LIMITED` |
+| `POST /auth/login` | `{ email, password }` | `200` (same as register) | `INVALID_CREDENTIALS`, `RATE_LIMITED` |
+| `POST /auth/refresh` | — (cookie) | `200 { user, accessToken, accessTokenExpiresAt }` + rotated cookie | `REFRESH_INVALID`, `REFRESH_REUSED` (family revoked), `CSRF_REQUIRED` |
+| `POST /auth/logout` | — (cookie) | `204`, cookie cleared, family revoked | `CSRF_REQUIRED` |
 
----
+### Users
 
-## 5. Auth
-
-### `POST /auth/register`
-
-```ts
-// body
-{ email: string /* ≤254, normalized to lower case */,
-  password: string /* 10–72 UTF-8 bytes */,
-  displayName: string /* 1–50, trimmed */,
-  timezone: string /* IANA, auto-detected by the client */ }
-// 201
-{ user: UserDto, accessToken: string, accessTokenExpiresAt: Instant }
-// + Set-Cookie: ss_refresh=<opaque>; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=2592000
-```
-
-Errors: `400 VALIDATION_ERROR`, `400 INVALID_TIMEZONE`, `409 EMAIL_TAKEN`, `429`.
-
-### `POST /auth/login`
-
-Body `{ email, password }` → `200` (same shape as register, plus a new token family cookie).
-Errors: `401 INVALID_CREDENTIALS` (identical for unknown email and wrong password, with
-equalized timing), `429`.
-
-### `POST /auth/refresh`
-
-Requires the cookie and `X-StudySync-CSRF: 1`. → `200 { user, accessToken, accessTokenExpiresAt }`
-and a rotated cookie. The old token is marked `revoked_at` / `replaced_by_id`. Presenting an
-already-rotated token → `401 REFRESH_REUSED` and **the entire family is revoked**. A
-`token_version` mismatch → `401 REFRESH_INVALID`.
-
-### `POST /auth/logout`
-
-Cookie + CSRF → `204`. Revokes the family and clears the cookie. Idempotent.
-
-### `POST /auth/logout-all`
-
-Bearer → `204`. Increments `users.token_version`, revokes every refresh token, and emits
-`auth:revoked` to `user:{id}` before disconnecting all of the user's sockets.
-
----
-
-## 6. Users
-
-| Endpoint | Body | Response | Notes |
+| Endpoint | Body | Success | Notes |
 |---|---|---|---|
 | `GET /users/me` | — | `200 UserDto` | |
-| `PATCH /users/me` | `{ displayName?, timezone? }` | `200 UserDto` | A timezone change is written to `user_timezone_changes`. It affects **new segments only**; an open segment keeps its snapshot [Q13]. |
-| `PUT /users/me/password` | `{ currentPassword, newPassword }` | `200 { accessToken, accessTokenExpiresAt }` + new cookie | Increments `token_version` (all other devices are logged out) and revokes other families. Wrong current password → `401 INVALID_CREDENTIALS`. |
-| `DELETE /users/me` | `{ password }` | `204` | Ends the active session (`ACCOUNT_DELETED`), transfers or archives owned rooms, deletes data [Q18]. |
+| `PATCH /users/me` | `{ name?, timezone? }` | `200 UserDto` | A timezone change applies to segments started afterwards (I-10). The running segment keeps its snapshot. |
 
----
+### Rooms
 
-## 7. Rooms & membership
-
-Rooms are **reusable** (R7). They persist when empty, keep membership and tasks across visits,
-and are only archived explicitly by the owner. **Rooms have no timer** (R2).
-
-**Membership vs presence:** *membership* (REST) is durable access to a room. *Presence*
-(socket `room:join` / `room:leave`) means "I am in this room right now". Presence requires
-membership.
-
-| Endpoint | Body / Query | Success | Errors / rules |
+| Endpoint | Body / query | Success | Errors / rules |
 |---|---|---|---|
-| `GET /rooms` | `?cursor&limit` | `200 Page<RoomDto>` | Rooms where I am a member (archived included, flagged). |
-| `GET /rooms/discover` | `?q&cursor&limit` | `200 Page<RoomDto>` | `PUBLIC`, not archived. `q` is a case-insensitive name search (≤ 80 chars). |
-| `POST /rooms` | `{ name, description?, visibility, maxMembers? }` | `201 RoomDto` | The creator becomes `OWNER` (memberCount = 1). An invite code is generated (10 chars, unambiguous alphabet, retried on collision). |
-| `GET /rooms/:roomId` | — | `200 RoomDto` | Members get the full DTO. Non-members of a `PUBLIC` room get a preview (`myRole: null`, `inviteCode: null`). Otherwise `404`. |
-| `PATCH /rooms/:roomId` | `{ name?, description?, visibility?, maxMembers? }` | `200 RoomDto` | Moderators may edit name and description. Visibility and `maxMembers` are owner-only. `maxMembers ≥ memberCount`. Emits `room:updated`. |
-| `POST /rooms/:roomId/archive` | — | `200 RoomDto` | Owner only. Emits `room:archived`, clears presence, and clears the room context of members' active sessions (segment split, Q8). Archived rooms are read-only. |
-| `POST /rooms/:roomId/restore` | — | `200 RoomDto` | Owner only. |
-| `POST /rooms/join` | `{ inviteCode }` | `200 RoomDto` | Idempotent if already a member. `404 INVITE_INVALID`, `409 ROOM_FULL`, `409 ROOM_ARCHIVED`. Capacity uses a conditional update (C13). |
-| `POST /rooms/:roomId/join` | — | `200 RoomDto` | `PUBLIC` rooms only (private → `404`). Same errors as above. |
-| `POST /rooms/:roomId/leave` | — | `204` | The owner gets `409 OWNER_MUST_TRANSFER`. Removes presence on all of the user's sockets. Clears the room context of the user's active session (Q8). |
-| `POST /rooms/:roomId/invite-code/rotate` | — | `200 { inviteCode }` | Owner/moderator. The old code stops working immediately. |
-| `POST /rooms/:roomId/transfer-ownership` | `{ userId }` | `200 RoomDto` | Owner only. The target must be a member. The old owner becomes `MODERATOR`. Atomic. |
-| `GET /rooms/:roomId/members` | `?cursor&limit` | `200 Page<RoomMemberDto>` | Members only. |
-| `PATCH /rooms/:roomId/members/:userId` | `{ role: 'MODERATOR' \| 'MEMBER' }` | `200 RoomMemberDto` | Owner only. Emits `room:member_role_changed`. |
-| `DELETE /rooms/:roomId/members/:userId` | — | `204` | Owner removes anyone except themself. A moderator removes `MEMBER`s only. Emits `room:member_removed` to the room **and** to `user:{removed}`. The removed user's sockets leave the channel immediately. Their **timer is unaffected** apart from losing room context (R1). |
-| `GET /rooms/:roomId/presence` | — | `200 { members: MemberStatusDto[], serverNow }` | Members only. Same data as the `room:join` ack. |
+| `GET /rooms` | — | `200 { items: (RoomDto & { lastVisitedAt })[] }` | My Rooms, most recent first |
+| `POST /rooms` | `{ name (1–60) }` | `201 RoomDto` | Code generated (32-char alphabet, 6 chars, unique, retried). Creator becomes a member. **The client then emits `join_room`**, which moves an active solo session into the room ("Study with friends", F-12). Rejected with `SESSION_IN_OTHER_ROOM` if the caller's session lives in another room. 20/day per user. |
+| `POST /rooms/join` | `{ code }` (case-insensitive input, normalized to upper case) | `200 RoomDto` | Idempotent for existing members. `INVALID_CODE`, `ROOM_FULL`, `SESSION_IN_OTHER_ROOM` (no membership change), `RATE_LIMITED`. The client then emits `join_room`. |
+| `GET /rooms/:roomId` | — | `200 RoomDto` | Members only, else `404` |
+| `GET /rooms/:roomId/members` | — | `200 { members: MemberStatusDto[], serverNow }` | **All** members, absent ones `OFFLINE` (I-18) |
+| `GET /rooms/:roomId/tasks` | `?status=TODO\|DONE` | `200 { items: TaskDto[] }` | Not deleted. Ordered by status, due date, created. |
+| `GET /rooms/:roomId/today` | — | `200 TodayInRoomDto` | Live, includes running segments. The client refetches every 60 s and on `status_changed`. |
+| `GET /rooms/:roomId/history` | `from, to: LocalDate` (≤ 366 days) | `200 { days: { date, members: { user, studyMs }[] }[] }` | Phase 4. Per member, by that member's local date. |
 
----
+### Tasks (reads; mutations are socket events)
 
-## 8. Room tasks
-
-Shared, ordered, versioned. Every successful mutation is broadcast to `room:{roomId}` **after
-commit** (R8). Limits: 500 live tasks per room [Q10].
-
-### `GET /rooms/:roomId/tasks`
-
-`200 { items: TaskDto[] /* ordered by position */, serverNow }`. Members only.
-
-### `POST /rooms/:roomId/tasks`
-
-```ts
-{ id: UUID,                       // client-generated → idempotent create
-  title: string, notes?: string | null,
-  status?: TaskStatus,            // default TODO
-  afterTaskId?: UUID | null }     // insert after this task; omitted/null = append at end
-```
-
-- `201 TaskDto` and emits `task:created`.
-- A replay with the same `id` and the same content → `200 TaskDto` (no duplicate broadcast).
-- The same `id` with different content or a different room → `409 ID_CONFLICT`.
-- Archived room → `409 ROOM_ARCHIVED`. Limit reached → `409 TASK_LIMIT_REACHED` with
-  `details.limit`.
-
-### `PATCH /rooms/:roomId/tasks/:taskId`
-
-```ts
-{ expectedVersion?: number,       // REQUIRED when title or notes change
-  title?: string, notes?: string | null, status?: TaskStatus }
-```
-
-- `200 TaskDto` (version + 1) and emits `task:updated`.
-- **Status-only** changes are set-semantics, so `expectedVersion` is optional and setting the
-  current value is a no-op `200` (C11).
-- Moving to `DONE` sets `completedBy` / `completedAt`. Leaving `DONE` clears them.
-- `409 VERSION_CONFLICT { details.current: TaskDto }`, `410 TASK_DELETED`.
-
-### `POST /rooms/:roomId/tasks/:taskId/move`
-
-`{ expectedVersion: number, afterTaskId: UUID | null }` (`null` = move to top) → `200 TaskDto`
-with a new `position`, and emits `task:moved`. The server computes the key between neighbors
-under a per-room advisory lock (C12).
-
-### `DELETE /rooms/:roomId/tasks/:taskId`
-
-`204`. Creator, moderator or owner. Soft delete. Emits `task:deleted { taskId, version }`.
-Idempotent (already deleted → `204`). Edits after deletion → `410`.
-
----
-
-## 9. Study sessions (timer)
-
-All endpoints act **only on the caller's own session** (R1). A session id belonging to someone
-else → `404`. Every command:
-
-1. locks the session row,
-2. checks `commandId` idempotency,
-3. **reconciles due deadlines** (break elapsed, grace expired, idle timeout — each stamped at
-   its own deadline),
-4. applies the command through the pure state machine,
-5. persists segments, breaks, daily totals and events, then increments `version`,
-6. commits, emits `session:state` to `user:{id}` and `room:member_status` to the current room,
-   then reschedules deadlines.
-
-Every timer command counts as **activity** (resets the idle clock).
-
-Common command body: `{ commandId: UUID, expectedVersion?: number }`.
-Common success: `200 SessionStateDto` (`201` for start).
-Common errors: `404 NOT_FOUND`, `409 INVALID_TRANSITION` (+ current state), `409 SESSION_ENDED`,
-`409 VERSION_CONFLICT`, `400 VALIDATION_ERROR`.
-
-| Endpoint | Extra body | Legal from | Result | Rules |
-|---|---|---|---|---|
-| `GET /sessions/active` | — | — | `200 { session: SessionStateDto \| null }` | Reconciles before returning. |
-| `POST /sessions` | `{ commandId, roomId?: UUID \| null }` | no active session | `201` → `STUDYING` | **R6**: an existing active session → `409 SESSION_ALREADY_ACTIVE` with `details.session`. `roomId` requires membership and a non-archived room. |
-| `POST /sessions/:id/pause` | — | `STUDYING` | `PAUSED` (`pauseReason: USER`) | Segment closed at *now*. |
-| `POST /sessions/:id/resume` | — | `PAUSED`, `AWAITING_RESUME`, `ON_BREAK` | `STUDYING` | **The only way back to STUDYING (R5).** From `ON_BREAK` it ends the break early (`RESUMED_EARLY`) [Q4]. |
-| `POST /sessions/:id/breaks` | `{ durationMinutes: 5 \| 10 \| 15 \| 30 }` | `STUDYING` | `ON_BREAK` | **R4**: any other value → `400 VALIDATION_ERROR`. **R3**: the segment closes at the instant the break opens. No extension or chaining [Q5]. When it elapses the server moves the session to `AWAITING_RESUME`, **not** `STUDYING`. |
-| `POST /sessions/:id/end` | — | any non-ended | `ENDED` (`endReason: USER`) | Closes the open segment or break. |
-| `PUT /sessions/:id/room` | `{ commandId, roomId: UUID \| null }` | any non-ended | same status | Membership required. While `STUDYING`, the segment is split at *now* [Q8]. |
-| `POST /sessions/:id/activity` | `{}` | any non-ended | `204` | REST fallback for `activity:ping`. Postpones idle timeout only; never adds study time. |
-| `GET /sessions` | `?from&to&cursor&limit` | — | `200 Page<SessionSummaryDto>` | Newest first. |
-| `GET /sessions/:id` | — | — | `200 SessionDetailDto` | Segments, breaks and the event timeline. |
-
-**System transitions** (no endpoint; applied by reconcile and pushed as `session:state`):
-
-| Cause | From → To | Accounting |
-|---|---|---|
-| `BREAK_ELAPSED` | `ON_BREAK` → `AWAITING_RESUME` | Break closed at `endsAt`. **No automatic resume (R5).** |
-| `GRACE_EXPIRED` | `STUDYING` → `PAUSED` (`DISCONNECT_GRACE_EXPIRED`) | Segment closed at the disconnect instant (R9). |
-| `IDLE_TIMEOUT` | `STUDYING` / `PAUSED` / `AWAITING_RESUME` → `ENDED` | If studying, the segment is closed at the last activity [Q1/Q2] (R10). |
-
----
-
-## 10. Stats
-
-Read-only, scoped to the caller. Local dates are in the user's **current** timezone (R13).
-Ranges are capped at 366 days. Live values include the open segment where noted.
-
-| Endpoint | Query | Response |
-|---|---|---|
-| `GET /stats/today` | — | `{ localDate, timezone, studyMs /* incl. open segment */, breakMs, thresholdMs: 1500000, qualified, serverNow }` |
-| `GET /stats/daily` | `from, to: LocalDate` | `{ timezone, days: { date: LocalDate, studyMs, breakMs, qualified }[] }`: a continuous series with zero-filled gaps, ready for Recharts `BarChart`. |
-| `GET /stats/summary` | `range: '7d' \| '30d' \| '90d' \| '365d'` | `{ range, from, to, totalStudyMs, totalBreakMs, avgDailyStudyMs, activeDays, qualifiedDays, sessionsCount, longestSessionStudyMs, previous: { totalStudyMs, qualifiedDays } }` |
-| `GET /stats/streak` | — | `{ current, longest, currentStart: LocalDate \| null, lastQualifiedDate: LocalDate \| null, todayQualified, todayStudyMs, thresholdMs: 1500000, atRisk }`. The current streak counts today if qualified (including the open segment), otherwise it runs through yesterday; `atRisk = !todayQualified && current > 0`. |
-| `GET /stats/hourly` | `from, to: LocalDate` | `{ timezone, cells: { weekday: 1-7, hour: 0-23, studyMs }[] }` (heatmap) |
-| `GET /stats/rooms` | `from, to: LocalDate` | `{ rooms: { roomId: UUID \| null, roomName: string \| null, studyMs }[] }` (`null` = solo) |
-
-Additional analytics (room statistics, leaderboards) are pending the specification [Q16, Q20].
-
----
-
-## 11. Health & test-only
-
-| Endpoint | Response |
+| Endpoint | Success |
 |---|---|
-| `GET /health` | `200 { status: 'ok' }` |
-| `GET /health/ready` | `200 { status: 'ok', db: 'ok' }` or `503` |
-| `POST /__test__/clock` | `{ advanceMs?: number, setTo?: Instant }` → `200 { now }`. **Mounted only when `NODE_ENV=test` and `ENABLE_TEST_CLOCK=true`. Boot fails if enabled in production.** Used by E2E tests to fast-forward breaks, grace and idle. |
+| `GET /tasks?status=TODO\|DONE` | `200 { items: TaskDto[] }` (personal only, owner only) |
+
+### Sessions
+
+| Endpoint | Success | Notes |
+|---|---|---|
+| `GET /sessions/current` | `200 { session: SessionDto \| null, lastAutoSaved, serverNow }` | Reconciles first (a due auto-save is applied, stamped at its deadline) |
+| `GET /sessions?cursor&limit&from&to` | `200 { items: { id, startedAt, endedAt, endReason, roomId, roomName, studiedMs }[], nextCursor }` | Newest first |
+| `GET /sessions/:sessionId/summary` | `200 SessionSummaryDto` | Owner only. For a still-active session it returns a live partial summary with `endedAt: null` and `endReason: null`. |
+| `POST /sessions/:sessionId/summary-seen` | `204` | Sets `summary_seen_at`. Idempotent. |
+
+### Stats (caller only; local dates in the caller's current timezone)
+
+| Endpoint | Query | Success |
+|---|---|---|
+| `GET /stats/today` | — | `200 TodayDto` (includes the running segment) |
+| `GET /stats/daily` | `from, to: LocalDate` (≤ 366 days) | `200 { timezone, days: { date, soloMs, roomsMs, totalMs, qualified }[] }` (zero-filled) |
+| `GET /stats/streak` | — | `200 StreakDto` (computed from history, I-11) |
+| `GET /stats/periods` | `granularity: week \| month`, `from, to` | `200 { periods: { start: LocalDate, totalMs, soloMs, roomsMs, qualifiedDays }[] }` |
+| `GET /stats/heatmap` | `from, to` | `200 { cells: { weekday: 1-7, hour: 0-23, studyMs }[] }` |
 
 ---
 
-## 12. Socket.IO contract
-
-Typed maps `ClientToServerEvents` / `ServerToClientEvents` live in
-`packages/shared/src/realtime/events.ts`. Every inbound payload is Zod-validated.
-
-### 12.1 Connection
+## 6. Socket.IO connection
 
 ```ts
-const socket = io(origin, {
-  path: '/socket.io',
-  auth: { token: accessToken },
-  transports: ['websocket', 'polling'],
-});
+const socket = io(origin, { path: '/socket.io', auth: { token: accessToken }, transports: ['websocket', 'polling'] });
 ```
 
-- Handshake failure → `connect_error` with `err.message` ∈ `UNAUTHENTICATED`, `TOKEN_EXPIRED`,
-  `TOO_MANY_CONNECTIONS` (> 5 sockets per user).
-- After connect: the socket joins `user:{userId}`. If it is the user's first live socket, the
-  server applies `RECONNECTED` to the active session (clears grace).
-- After every (re)connect the client **must** emit `session:sync`, then `room:join` for the room
-  it is viewing (resync contract, ARCHITECTURE §8.5).
-
-### 12.2 Acks
+1. Handshake: JWT verified (HS256, `iss`/`aud`). Failure → `connect_error` with message
+   `UNAUTHENTICATED` / `TOKEN_EXPIRED` / `TOO_MANY_CONNECTIONS` (> 5 per user).
+2. The socket joins `user:{userId}`. Liveness is re-evaluated: for a solo session this
+   connection makes the user live again (`RECONNECTED` if in grace).
+3. **The server immediately emits `session_state`** (`cause: 'CONNECT'`) to that socket. This
+   is the spec's refresh-proof reconstruction.
+4. If the client is on a room screen, it emits `join_room`. The ack carries every snapshot it
+   needs.
 
 Every client→server event takes an ack callback:
-
-```ts
-type Ack<T> = (res: { ok: true; data: T } | { ok: false; error: { code: string; message: string } }) => void;
-```
-
-### 12.3 Client → server
-
-| Event | Payload | Ack data | Rules |
-|---|---|---|---|
-| `auth:renew` | `{ token: string }` | `{ expiresAt: Instant }` | Swaps the socket's token before expiry without reconnecting. Re-checks `token_version`. |
-| `clock:sync` | `{ clientSentAt: number }` (client epoch ms) | `{ clientSentAt, serverNow: Instant }` | Used for NTP-style offset estimation. |
-| `session:sync` | `{}` | `{ session: SessionStateDto \| null }` | Reconciles, then returns the authoritative state. |
-| `activity:ping` | `{}` | `{ idleDeadlineAt: Instant \| null }` | Throttled by the client to ≤ 1/60 s. Resets the idle clock (R10). Never adds study time. |
-| `room:join` | `{ roomId: UUID }` | `{ room: RoomDto, members: MemberStatusDto[], tasks: TaskDto[], serverNow }` | Requires membership and a non-archived room. Leaves the previously joined room on all of the user's sockets [Q7]. Updates `room_members.last_visited_at`. Emits `room:member_joined`. Presence join **does not** change the timer's room context; the client calls `PUT /sessions/:id/room` if needed [Q8]. |
-| `room:leave` | `{ roomId: UUID }` | `{}` | Removes presence (all of the user's sockets) and emits `room:member_left { reason: 'LEFT' }`. Membership is unchanged. |
-
-### 12.4 Server → client
-
-| Event | Channel | Payload | Trigger |
-|---|---|---|---|
-| `session:state` | `user:{id}` | `{ session: SessionStateDto, cause: SessionCause }` | Every committed session change (user or system). Clients apply it only if `version` is newer. |
-| `session:idle_warning` | `user:{id}` | `{ sessionId, idleDeadlineAt: Instant, serverNow }` | 5 min before idle timeout (at 25 min idle). The client shows "Still studying?" |
-| `room:member_joined` | `room:{id}` | `{ roomId, member: MemberStatusDto }` | Presence join |
-| `room:member_left` | `room:{id}` | `{ roomId, userId, reason: 'LEFT' \| 'DISCONNECTED' \| 'REMOVED' \| 'SWITCHED_ROOM' }` | Presence leave / grace expired / kick |
-| `room:member_status` | `room:{id}` | `{ roomId, member: MemberStatusDto }` | A member's connection (`online` ↔ `reconnecting`) or **their own** timer status changed |
-| `room:updated` | `room:{id}` | `{ room: RoomDto }` | Room edited |
-| `room:archived` | `room:{id}` | `{ roomId }` | Archived. Clients navigate away. Sockets are removed from the channel. |
-| `room:member_removed` | `room:{id}` + `user:{removed}` | `{ roomId, userId }` | Kick |
-| `room:member_role_changed` | `room:{id}` | `{ roomId, userId, role }` | Role change / ownership transfer |
-| `task:created` | `room:{id}` | `{ roomId, task: TaskDto, actorId }` | |
-| `task:updated` | `room:{id}` | `{ roomId, task: TaskDto, actorId }` | |
-| `task:moved` | `room:{id}` | `{ roomId, task: TaskDto, actorId }` | |
-| `task:deleted` | `room:{id}` | `{ roomId, taskId, version, actorId }` | |
-| `auth:expired` | socket | `{}` | Token expired without renewal. The server disconnects next. |
-| `auth:revoked` | `user:{id}` | `{}` | Logout-all / password change. The server disconnects next. |
-
-**There is deliberately no event that starts, stops or changes a timer for a room or for
-another user (R2).**
+`(res: { ok: true, data } | { ok: false, error: { code, message, details? } }) => void`.
 
 ---
 
-## 13. Realtime flows
+## 7. Client → server events
 
-### 13.1 Entering a room
+| Event | Spec | Payload | Ack `data` | Rules |
+|---|---|---|---|---|
+| `join_room` | ✓ | `{ roomId }` | `{ room: RoomDto, members: MemberStatusDto[], tasks: TaskDto[], today: TodayInRoomDto, session: SessionDto \| null, serverNow }` | Membership required (`NOT_FOUND`). Leaves presence in any other room (I-08). **If the user has an active solo session, it moves into this room** (segment split, F-15, `session_state` cause `MOVED_TO_ROOM`). If the session lives in another room → `SESSION_IN_OTHER_ROOM` (no change). Updates `last_visited_at`. Broadcasts `member_joined`. |
+| `leave_room` | ✓ | `{ roomId }` | `{}` | Presence ends. If the user's session lives in this room → grace starts (I-02). Others see the last status with `reconnecting`, then `OFFLINE` after 2 min. |
+| `start_study` | ✓ | `{ commandId, roomId: UUID \| null, taskId?: UUID \| null }` | `{ session: SessionDto }` | `roomId` must equal the user's current room presence (or `null` if none): `MUST_START_IN_CURRENT_ROOM`. `SESSION_ALREADY_ACTIVE`. `TASK_NOT_ATTACHABLE`. |
+| `take_break` | ✓ | `{ commandId, sessionId, durationMinutes: 5 \| 10 \| 15 \| 30 }` | `{ session }` | `NOT_STUDYING`, `VALIDATION_ERROR` |
+| `resume_study` | ✓ | `{ commandId, sessionId }` | `{ session }` | `BREAK_NOT_OVER` (until the countdown hits 0), `NOT_ON_BREAK`, `NOT_IN_SESSION_ROOM` |
+| `end_study` | ✓ | `{ commandId, sessionId }` | `{ summary: SessionSummaryDto }` | Allowed from every phase. Membership is untouched. |
+| `set_session_task` | (+) | `{ commandId, sessionId, taskId: UUID \| null }` | `{ session }` | Attach or clear the "what am I working on" task (F-29, I-17) |
+| `task_add` | ✓ | `{ id: UUID, roomId: UUID \| null, title, description?, dueDate?: LocalDate }` | `{ task: TaskDto }` | `roomId` null = personal. A replayed `id` returns the existing task. Room tasks require membership. |
+| `task_toggle` | ✓ | `{ taskId, done: boolean }` | `{ task }` | **Set semantics** (I-14): a no-op if already in that state. Sets or clears `completed_by` / `completed_at`. |
+| `task_update` | (+) | `{ taskId, expectedVersion, title?, description?, dueDate?: LocalDate \| null }` | `{ task }` | `VERSION_CONFLICT` with `details.current` |
+| `task_delete` | (+) | `{ taskId }` | `{}` | Personal: owner. Room: task creator or room creator (`FORBIDDEN`). Soft delete. |
+| `sync_state` | (+) | `{}` | `SessionStatePayload` | Explicit resync and clock-offset sample |
+| `auth_renew` | (+) | `{ token }` | `{ expiresAt }` | Swap the socket's token before expiry |
+
+---
+
+## 8. Server → client events
+
+| Event | Spec | Channel | Payload | When |
+|---|---|---|---|---|
+| `session_state` | ✓ | `user:{me}` (all my devices) | `SessionStatePayload` | On connect, and on **every** change to my session: commands, break countdown reaching 0 (`BREAK_OVER`), grace started or ended, auto-save, room move, task attach |
+| `member_joined` | ✓ | `room:{id}` | `{ roomId, member: MemberStatusDto }` | A member's presence begins |
+| `member_left` | ✓ | `room:{id}` | `{ roomId, userId }` | 2-min display grace over → shown `OFFLINE` |
+| `status_changed` | ✓ | `room:{id}` | `{ roomId, member: MemberStatusDto }` | A member started, took a break (with `breakEndsAt`), reached break over (`IDLE`), resumed, ended (`IDLE`), or lost/regained presence (`reconnecting`) |
+| `room_task_updated` | ✓ | `room:{id}` | `{ roomId, action: 'added' \| 'updated' \| 'deleted', task?: TaskDto, taskId, actorId }` | Any room task change, after commit |
+| `personal_task_updated` | (+) | `user:{me}` | `{ action, task?: TaskDto, taskId }` | Personal task change (keeps my other devices in sync) |
+| `auth_expired` | (+) | socket | `{}` | Token expired without renewal. The server disconnects next. |
+
+**No event starts, stops or changes a timer for a room or for another user (R2).**
+
+---
+
+## 9. Realtime flows
+
+### 9.1 Phase 0 spike: two browsers, live status, refresh-safe timer
 
 ```mermaid
 sequenceDiagram
-  participant A as Alice (client)
+  participant A as Browser A (Chitransh)
   participant S as Server
-  participant R as room:{id} (Bob, Chen)
-  A->>S: POST /rooms/join {inviteCode}   (first time only — membership)
-  A->>S: socket room:join {roomId}
-  S->>S: check membership · leave previous room · presence add
-  S-->>A: ack {room, members[], tasks[], serverNow}
-  S-->>R: room:member_joined {member: Alice (timer: her own status)}
-  Note over A: If Alice has an active session elsewhere, the client may call<br/>PUT /sessions/:id/room to move its room context (segment split)
+  participant B as Browser B (Rahul)
+  A->>S: connect (JWT) → session_state {session: null}
+  B->>S: connect (JWT) → session_state {session: null}
+  A->>S: join_room {roomId}
+  S-->>A: ack {members, tasks, today, session: null}
+  S-->>B: member_joined {Chitransh, IDLE}
+  A->>S: start_study {commandId, roomId}
+  S-->>A: ack {session STUDYING} + session_state
+  S-->>B: status_changed {Chitransh, STUDYING}
+  Note over A: A presses F5 (socket drops, back in ~1 s ≪ 2 min)
+  A->>S: connect → session_state {STUDYING, currentSegmentStartedAt, studyMsClosed}
+  A->>S: join_room {roomId}
+  Note over A: Timer resumes at the correct value: now − segment.started_at + closed
 ```
 
-### 13.2 Task sync
+### 9.2 Study with friends (mid-study room creation, F-12)
 
 ```mermaid
 sequenceDiagram
-  participant A as Alice
+  participant A as Chitransh (solo, STUDYING 30 min)
   participant S as Server
-  participant DB as Postgres
-  participant R as room:{id}
-  A->>A: optimistic insert (client UUID)
-  A->>S: POST /rooms/:id/tasks {id, title}
-  S->>DB: INSERT (advisory lock for position) · COMMIT
-  S-->>A: 201 TaskDto (version 1)
-  S-->>R: task:created {task v1}
-  Note over A: Alice receives her own broadcast too and dedupes by id + version
+  A->>S: POST /rooms {name: "DSA Night Study"}
+  S-->>A: 201 {room, code: "DSA7K2"}
+  A->>S: join_room {roomId}
+  S->>S: lock(user) · close segment at t (ROOM_MOVE) · open segment at t (room) · room_id = R
+  S-->>A: ack {…, session: STUDYING (elapsed unchanged)}
+  S-->>A: session_state {cause: MOVED_TO_ROOM}
+  Note over A: The timer never resets. Today = Solo 30m + Rooms (running)
 ```
 
-### 13.3 Disconnect grace (R9)
+### 9.3 Break → Break Over → Resume (R3, R4, R5)
 
 ```mermaid
 sequenceDiagram
-  participant A as Alice (STUDYING)
+  participant A as Rahul
   participant S as Server
   participant R as room:{id}
-  A--xS: connection lost (last socket) at T
-  S->>S: DISCONNECTED{at:T} → grace_expires_at = T+2m
-  S-->>R: room:member_status {connection: reconnecting}
-  alt reconnects before T+2m
-    A->>S: connect + session:sync
-    S->>S: RECONNECTED (grace cleared, still STUDYING, gap credited)
-    S-->>A: session:state {cause: RECONNECTED}
-    S-->>R: room:member_status {connection: online}
-  else no reconnect by T+2m
-    S->>S: GRACE_EXPIRED → PAUSED, segment closed at T
-    S-->>R: room:member_left {reason: DISCONNECTED}
-    A->>S: (later) connect + session:sync
-    S-->>A: session:state {status: PAUSED, pauseReason: DISCONNECT_GRACE_EXPIRED}
-    Note over A: Timer stays PAUSED until Alice presses Resume (R5)
+  A->>S: take_break {sessionId, durationMinutes: 10}
+  S-->>A: session_state {ON_BREAK, break.endsAt = t+10m}
+  S-->>R: status_changed {Rahul, ON_BREAK, breakEndsAt}  → others show "On Break 09:59…"
+  A->>S: resume_study (at t+5m)
+  S-->>A: ack {ok:false, BREAK_NOT_OVER, breakEndsAt}
+  Note over S: at t+10m (scheduler; derived phase, no DB write)
+  S-->>A: session_state {BREAK_OVER, autoSaveAt = t+40m}
+  S-->>R: status_changed {Rahul, IDLE}
+  Note over A: "Break over — Resume" (no auto resume)
+  A->>S: resume_study
+  S-->>A: session_state {STUDYING}
+  S-->>R: status_changed {Rahul, STUDYING}
+```
+
+### 9.4 Disconnect grace (R9)
+
+```mermaid
+sequenceDiagram
+  participant A as Aman (room session, STUDYING)
+  participant S as Server
+  participant R as room:{id}
+  A--xS: last socket in the room gone at T
+  S->>S: disconnected_at = T
+  S-->>R: status_changed {Aman, STUDYING, reconnecting: true}
+  alt back before T + 2 min
+    A->>S: connect + join_room
+    S->>S: disconnected_at = NULL (phase unchanged, gap credited)
+    S-->>R: status_changed {Aman, STUDYING, reconnecting: false}
+  else not back
+    S->>S: at T + 2 min: ENDED (DISCONNECTED), segment closed at T
+    S-->>R: member_left {Aman} → OFFLINE
+    A->>S: (later) connect
+    S-->>A: session_state {session: null, lastAutoSaved: {studiedMs, endReason: DISCONNECTED}}
+    Note over A: "Session saved: 1h 12m" toast → start a fresh session any time
   end
 ```
 
-### 13.4 Break lifecycle (R3, R4, R5)
+### 9.5 Room task check-off (R8)
 
 ```mermaid
 sequenceDiagram
-  participant A as Alice
+  participant A as Chitransh
   participant S as Server
-  A->>S: POST /sessions/:id/breaks {durationMinutes: 10}
-  S-->>A: 200 ON_BREAK (endsAt = t+10m)  · segment closed at t
-  Note over S: scheduler fires at endsAt (sweeper/reconcile as backup)
-  S-->>A: session:state {status: AWAITING_RESUME, cause: BREAK_ELAPSED}
-  Note over A: UI: "Break over — Resume when ready" (no auto resume)
-  A->>S: POST /sessions/:id/resume
-  S-->>A: 200 STUDYING (new segment)
+  participant R as room:{id} (incl. A)
+  A->>S: task_toggle {taskId, done: true}
+  S->>S: membership check · UPDATE … status=DONE, completed_by, version+1 · COMMIT
+  S-->>A: ack {task v4}
+  S-->>R: room_task_updated {action: updated, task v4}
+  Note over R: Clients apply only if version > local (A dedupes its own echo)
 ```
 
 ---
 
-## 14. Rate limits
-
-Initial values, tuned in Phase 9. Keyed per IP for anonymous endpoints and per user otherwise.
+## 10. Rate limits
 
 | Scope | Limit |
 |---|---|
-| `POST /auth/login` | 5 / min per IP+email, 20 / min per IP |
-| `POST /auth/register` | 5 / hour per IP |
-| `POST /auth/refresh` | 30 / min per IP |
-| Timer commands | 30 / min per user |
-| `POST …/activity` | 2 / min per user |
-| Task mutations | 120 / min per user |
-| Room create / join | 20 / hour per user |
-| Other authenticated reads | 300 / min per user |
-| Socket `activity:ping` | 2 / min per socket |
-| Socket `room:join` / `room:leave` | 10 / min per socket |
-| Socket other events | 60 / min per socket |
-| Concurrent sockets | 5 per user |
+| `POST /auth/login` | 5/min per IP+email · 20/min per IP |
+| `POST /auth/register` | 5/hour per IP |
+| `POST /auth/refresh` | 30/min per IP |
+| `POST /rooms/join` (code guessing) | 10/min and 30/hour per user · 60/hour per IP |
+| `POST /rooms` | 20/day per user |
+| REST reads | 300/min per user |
+| Socket timer commands (`start_study`, `take_break`, `resume_study`, `end_study`, `set_session_task`) | 30/min per socket |
+| Socket task events | 120/min per socket |
+| `join_room` / `leave_room` | 20/min per socket |
+| `sync_state` | 30/min per socket |
+| Sockets per user | 5 |
 
 ---
 
-## 15. Authorization matrix
+## 11. Authorization matrix
 
-| Action | Non-member | Member | Moderator | Owner |
-|---|---|---|---|---|
-| View public room preview | ✓ (public only) | ✓ | ✓ | ✓ |
-| View private room / members / tasks / presence | ✗ (404) | ✓ | ✓ | ✓ |
-| Join public room | ✓ | — | — | — |
-| Join private room | with invite code | — | — | — |
-| `room:join` presence | ✗ | ✓ | ✓ | ✓ |
-| Create / edit / move / complete task | ✗ | ✓ | ✓ | ✓ |
-| Delete task | ✗ | own tasks | ✓ | ✓ |
-| Edit room name / description | ✗ | ✗ | ✓ | ✓ |
-| Change visibility / capacity | ✗ | ✗ | ✗ | ✓ |
-| Rotate invite code | ✗ | ✗ | ✓ | ✓ |
-| Remove member | ✗ | ✗ | MEMBERs only | anyone but self |
-| Change roles / transfer ownership | ✗ | ✗ | ✗ | ✓ |
-| Archive / restore room | ✗ | ✗ | ✗ | ✓ |
-| Leave room | — | ✓ | ✓ | after transfer |
-| Read or control **another user's** timer | ✗ | ✗ | ✗ | ✗ |
-| See another member's timer **status** (Q11) | ✗ | ✓ | ✓ | ✓ |
+| Action | Anonymous | Authenticated non-member | Room member | Room creator | Task creator |
+|---|---|---|---|---|---|
+| Register / login | ✓ | — | — | — | — |
+| Own profile, own session, own history, own stats | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Join room by valid code | ✗ | ✓ | ✓ (idempotent) | ✓ | — |
+| Read room / members / statuses / tasks / today / history | ✗ | ✗ (404) | ✓ | ✓ | — |
+| `join_room` presence, receive room broadcasts | ✗ | ✗ | ✓ | ✓ | — |
+| Start a session in the room | ✗ | ✗ | ✓ (while present) | ✓ | — |
+| Add / toggle / edit room task | ✗ | ✗ | ✓ | ✓ | ✓ |
+| Delete room task | ✗ | ✗ | ✗ | ✓ | ✓ |
+| Personal tasks | ✗ | owner only | owner only | owner only | owner only |
+| Attach task to own session | ✗ | own personal | own personal + session room's tasks | same | same |
+| See another member's display status | ✗ | ✗ | ✓ | ✓ | — |
+| See another member's personal totals, tasks or history | ✗ | ✗ | ✗ (only "Today in this room" / room history) | ✗ | — |
+| Control another user's timer | ✗ | ✗ | ✗ | ✗ | ✗ |
 
-The permission model is pending the specification [Q9, Q10].
+Room management actions (rename, regenerate code, remove member) are pending **D-2**.

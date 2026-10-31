@@ -1,26 +1,26 @@
 # StudySync — Database Design
 
-> **Status: Draft v0.1 (planning phase).** PostgreSQL 16 + Prisma ORM. Based on the kickoff
-> product rules. Items tagged **[Qn]** refer to open questions in
-> [ARCHITECTURE.md §3](./ARCHITECTURE.md#3-assumptions--open-questions) and may change once
-> the full specification arrives.
+> **Status: v1.0 FINAL — reconciled with the final spec. Awaiting approval.**
+> PostgreSQL 16 + Prisma. Interpretation IDs (I-xx), gap IDs (D-x) and rule IDs (R-x) refer to
+> [ARCHITECTURE.md](./ARCHITECTURE.md). The hand-written SQL (§5) and the time-splitting
+> queries (§6) were **executed and validated against PostgreSQL 16** in the development container.
 
 ---
 
 ## Contents
 
 1. [Design goals](#1-design-goals)
-2. [Conventions](#2-conventions)
-3. [Entity–relationship overview](#3-entityrelationship-overview)
+2. [Spec schema → final schema](#2-spec-schema--final-schema)
+3. [Relationships](#3-relationships)
 4. [Prisma schema](#4-prisma-schema)
-5. [Constraints Prisma cannot express (hand-written SQL)](#5-constraints-prisma-cannot-express-hand-written-sql)
+5. [Hand-written constraints and indexes](#5-hand-written-constraints-and-indexes)
 6. [Key queries](#6-key-queries)
 7. [Index rationale](#7-index-rationale)
-8. [Invariants & audit queries](#8-invariants--audit-queries)
-9. [Migrations workflow](#9-migrations-workflow)
-10. [Seed data](#10-seed-data)
-11. [Retention, deletion & backups](#11-retention-deletion--backups)
-12. [Capacity estimates](#12-capacity-estimates)
+8. [Invariant audit queries](#8-invariant-audit-queries)
+9. [Feature → data support check](#9-feature--data-support-check)
+10. [Migrations workflow](#10-migrations-workflow)
+11. [Seed data](#11-seed-data)
+12. [Retention and capacity](#12-retention-and-capacity)
 
 ---
 
@@ -28,73 +28,82 @@
 
 | Goal | How |
 |---|---|
-| Rules enforced by the DB, not just the app | Partial unique indexes (one active session, one open segment/break), `CHECK` constraints (break durations, state/column consistency), `EXCLUDE` constraints (no overlapping intervals). |
-| Study time is auditable and exact | Every study interval is a row in `study_segments`, and every break a row in `break_periods`. Durations are integer milliseconds derived from UTC instants. |
-| UTC everywhere (R12) | All instants are `timestamptz(3)`, and the connection forces `timezone=UTC`. Local calendar days are stored only as `date` in rollups. |
-| Daily totals in the user's timezone (R13) | `daily_study_totals(user_id, local_date)` is filled by app-side splitting of segments at local midnights. Each segment carries a timezone snapshot. |
-| Fast reads for realtime and charts | Denormalized current-state fields on `study_sessions`, a daily rollup table, and a cached streak table. |
-| Safe concurrency | Row locks on the session row. Atomic upserts for rollups. A `version` column on mutable shared entities. |
+| Segments are the single source of study time (spec §5) | Every number (session total, daily totals, Solo/Rooms, today in room, streak, charts) is a **query** over `study_segments`. **No stored counters.** |
+| Timer rules enforced by the database | One ACTIVE session per user, studying-XOR-break, legal break durations, no resume before the countdown ends, idle bound, no overlapping intervals, no system-initiated resume. |
+| UTC storage, local-day grouping (R12, R13) | `timestamptz(3)` everywhere, DB/session timezone UTC. Local days computed in SQL from per-segment timezone snapshots (validated on DST edge cases). |
+| Restart-safe auto-save (R9, R10) | All deadlines derive from persisted columns (`break_ends_at`, `disconnected_at`, `last_seen_at`). |
+| Membership ≠ session (R16) | `room_members` and `study_sessions` are independent tables with independent lifecycles. |
 
 ---
 
-## 2. Conventions
+## 2. Spec schema → final schema
 
-- **Naming:** tables and columns in `snake_case` (via `@@map` / `@map`). Prisma models in
-  `PascalCase`, fields in `camelCase`.
-- **Primary keys:** UUID v4 (`gen_random_uuid()` / Prisma `uuid()`). Room tasks also accept
-  **client-generated** UUIDs, which makes creates idempotent. `session_events` uses `bigserial`
-  (append-only, ordered).
-- **Timestamps:** `timestamptz(3)` (millisecond precision). `created_at` / `updated_at` on
-  mutable tables.
-- **Durations:** `integer` milliseconds, suffix `_ms`.
-- **Soft delete:** only where history matters (`rooms.archived_at`, `room_tasks.deleted_at`).
-- **Enums:** PostgreSQL enums via Prisma.
-- **Named constraints:** every hand-written constraint and index has an explicit name, so a
-  test can assert it exists after migrations (§9).
+The spec's schema is kept. **Additions** are listed with the requirement that needs them.
+
+| Table | Spec columns (kept) | Added | Why |
+|---|---|---|---|
+| `users` | id, name, email, password_hash, timezone, created_at | `updated_at` | Timezone and name are editable (F-34) |
+| `refresh_tokens` | — | whole table | JWT sessions that survive page refresh securely (I-22). Rotation + reuse detection. |
+| `rooms` | id, name, code (unique), created_by, created_at | `updated_at`, code format CHECK | F-13 (no O/0/I/1), D-2 ready |
+| `room_members` | room_id, user_id, joined_at, unique together | `last_visited_at` | My Rooms ordering, one-click rejoin (F-19) |
+| `tasks` | id, user_id, room_id (NULL = personal), title, description, status, due_date, created_at, completed_at | `completed_by_id`, `version`, `updated_at`, `deleted_at` | "Completed during session" for room tasks (I-13); edit conflicts (E-21); keep attached-task title in summaries (E-22) |
+| `study_sessions` | id, user_id, room_id, task_id, started_at, ended_at, status (ACTIVE/ENDED), break_ends_at | `end_reason`, `current_segment_started_at`, `last_seen_at`, `disconnected_at`, `summary_seen_at`, `version`, `created_at`, `updated_at` | Auto-save reason and toast (F-40); DB-enforced studying-XOR-break; disconnect grace and crash detection that survive restarts (R9); push ordering |
+| `study_segments` | id, session_id, started_at, ended_at (NULL = studying) | `user_id`, `room_id`, `timezone`, `end_reason`, `created_at` | Per-user no-overlap constraint; Solo/Rooms split when a solo session moves into a room (F-12, F-38); stable local-day grouping (I-10); audit |
+| `study_breaks` | — (spec: "breaks are gaps") | whole table | The gap model cannot represent a break that ends the session, cannot prove the 5/10/15/30 rule in data, and cannot separate break time from waiting time (I-12). `study_sessions.break_ends_at` is kept as the spec's current-break field. |
+| `session_events` | — | whole table | Command idempotency (`commandId`), audit trail, DB-checked "no system resume" (R5) |
+
+**Not stored (computed):** session duration, daily totals, Solo/Rooms split, today in room,
+streak, weekly/monthly/heatmap aggregates, current phase.
 
 ---
 
-## 3. Entity–relationship overview
+## 3. Relationships
 
 ```mermaid
 erDiagram
-  users ||--o{ refresh_tokens : "auth"
-  users ||--o{ user_timezone_changes : "audit"
-  users ||--o{ room_members : "joins"
-  users ||--o{ rooms : "owns"
-  rooms ||--o{ room_members : "has"
-  rooms ||--o{ room_tasks : "contains"
-  users ||--o{ study_sessions : "runs (≤1 active)"
-  rooms |o--o{ study_sessions : "current context"
-  study_sessions ||--o{ study_segments : "study intervals"
-  study_sessions ||--o{ break_periods : "break intervals"
+  users ||--o{ refresh_tokens : "logs in with"
+  users ||--o{ rooms : "created_by"
+  users ||--o{ room_members : "is member via"
+  rooms ||--o{ room_members : "has members"
+  users ||--o{ tasks : "owns (personal) / created (room)"
+  rooms |o--o{ tasks : "room tasks (room_id NULL = personal)"
+  users ||--o{ study_sessions : "runs (≤ 1 ACTIVE)"
+  rooms |o--o{ study_sessions : "session lives in (NULL = solo)"
+  tasks |o--o{ study_sessions : "attached task (optional)"
+  study_sessions ||--o{ study_segments : "study blocks"
+  study_sessions ||--o{ study_breaks : "breaks"
   study_sessions ||--o{ session_events : "audit log"
-  users ||--o{ daily_study_totals : "per local day"
-  users ||--o| user_streaks : "cache"
+  rooms |o--o{ study_segments : "recorded in (NULL = solo)"
 ```
 
-| Table | Purpose | Mutability |
-|---|---|---|
-| `users` | Accounts, timezone, token version | Mutable |
-| `refresh_tokens` | Hashed rotating refresh tokens with family tracking | Append + revoke |
-| `user_timezone_changes` | Audit of timezone changes [Q13] | Append-only |
-| `rooms` | Reusable rooms (no timer fields — R2) | Mutable, soft-archive |
-| `room_members` | Durable membership + role | Mutable |
-| `room_tasks` | Shared, ordered, versioned room tasks | Mutable, soft-delete |
-| `study_sessions` | One user's timer run + current state + deadlines | Mutable (row-locked) |
-| `study_segments` | Closed and open study intervals — **the only source of study time** | Insert + close once |
-| `break_periods` | Break intervals (5/10/15/30) | Insert + close once |
-| `session_events` | Append-only timer audit log + command idempotency | Append-only |
-| `daily_study_totals` | Study/break ms per user per local date | Atomic increments |
-| `user_streaks` | Cached current/longest streak (recomputable) | Recomputed |
+**How the pieces relate:**
+
+- **User ↔ Room is many-to-many through `room_members`.** Membership is durable: it is what
+  *My Rooms* lists and what grants access. It is **not** presence (in memory) and **not** a
+  session.
+- **User → Study session is one-to-many**, with **at most one `ACTIVE`** (partial unique
+  index). Past sessions stay `ENDED` forever as history.
+- **Study session → Room is optional many-to-one.** `room_id` is where the session *lives*
+  (NULL = solo). It can change only once, from NULL to a room (I-06). Rooms never own
+  sessions: a room keeps existing with zero sessions (reusable, R7).
+- **Study session → Segments (1-to-many)** are the study time. Each segment has its own
+  `room_id` and `timezone` snapshot, so a session that moved from solo into a room splits
+  correctly into Solo and Rooms time, and days are grouped stably.
+- **Study session → Breaks (1-to-many).** Each break is the chosen 5/10/15/30 countdown plus
+  when it actually closed. A session's history alternates segment, break, segment, …, with no
+  overlaps.
+- **Tasks** belong to a user (personal, `room_id` NULL) or to a room (`room_id` set, `user_id`
+  = creator). A session may reference one task (`task_id`). Tasks never affect time.
+- **Session events** are an append-only log per session. `(user_id, command_id)` is unique for
+  idempotent retries.
 
 ---
 
 ## 4. Prisma schema
 
-> Generator and datasource syntax will be adjusted to the Prisma major version chosen in
-> Phase 1. With Prisma ≥ 7: the `prisma-client` generator with an explicit `output`, the
-> connection URL in `prisma.config.ts`, and the `@prisma/adapter-pg` driver adapter.
+> Generator and datasource syntax follow the Prisma major version chosen at scaffold time.
+> With Prisma ≥ 7: the `prisma-client` generator with an `output`, the URL in
+> `prisma.config.ts`, and the `@prisma/adapter-pg` driver adapter.
 
 ```prisma
 generator client {
@@ -103,71 +112,56 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL") // must include options=-c timezone=UTC
+  url      = env("DATABASE_URL") // includes options=-c timezone=UTC
 }
 
-// ───────────────────────────── Enums ─────────────────────────────
+// ───────────────────────── Enums ─────────────────────────
 
-enum RoomVisibility {
-  PUBLIC
-  PRIVATE
+enum SessionStatus {
+  ACTIVE
+  ENDED
 }
 
-enum RoomRole {
-  OWNER
-  MODERATOR
-  MEMBER
+enum SessionEndReason {
+  USER          // End Study
+  DISCONNECTED  // 2-min grace expired (auto-save)
+  IDLE_TIMEOUT  // 30 min in Break Over (auto-save)
+}
+
+enum SegmentEndReason {
+  BREAK
+  ENDED_BY_USER
+  DISCONNECTED
+  ROOM_MOVE     // solo session moved into a room; a new segment continues immediately
+}
+
+enum BreakCloseReason {
+  RESUMED
+  ENDED_BY_USER
+  DISCONNECTED
+  IDLE_TIMEOUT
 }
 
 enum TaskStatus {
   TODO
-  IN_PROGRESS
   DONE
 }
 
-enum SessionStatus {
+enum TimerPhase {
+  NO_SESSION
   STUDYING
-  PAUSED
   ON_BREAK
-  AWAITING_RESUME
+  BREAK_OVER
   ENDED
-}
-
-enum PauseReason {
-  USER
-  DISCONNECT_GRACE_EXPIRED
-}
-
-enum SessionEndReason {
-  USER
-  IDLE_TIMEOUT
-  ACCOUNT_DELETED
-}
-
-enum SegmentEndReason {
-  PAUSED
-  BREAK_STARTED
-  SESSION_ENDED
-  GRACE_EXPIRED
-  IDLE_TIMEOUT
-  ROOM_CHANGED
-}
-
-enum BreakEndReason {
-  ELAPSED
-  RESUMED_EARLY
-  SESSION_ENDED
 }
 
 enum SessionEventType {
   STARTED
-  PAUSED
+  BREAK_TAKEN
   RESUMED
-  BREAK_STARTED
-  BREAK_ELAPSED
-  BREAK_ENDED_EARLY
-  ROOM_CHANGED
   ENDED
+  MOVED_TO_ROOM
+  TASK_SET
   DISCONNECTED
   LEASE_LOST
   RECONNECTED
@@ -180,31 +174,26 @@ enum EventActor {
   SYSTEM
 }
 
-// ───────────────────────────── Identity ─────────────────────────────
+// ───────────────────────── Identity ─────────────────────────
 
 model User {
-  id                String   @id @default(uuid()) @db.Uuid
-  email             String   @unique @db.VarChar(254) // stored lower-cased (CHECK in §5)
-  passwordHash      String   @map("password_hash") @db.VarChar(100)
-  displayName       String   @map("display_name") @db.VarChar(50)
-  timezone          String   @db.VarChar(64) // IANA, validated in app
-  tokenVersion      Int      @default(0) @map("token_version")
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(50)
+  email        String   @unique @db.VarChar(254) // lower-cased (CHECK)
+  passwordHash String   @map("password_hash") @db.VarChar(100)
+  timezone     String   @db.VarChar(64) // IANA, validated in app
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  refreshTokens     RefreshToken[]
-  timezoneChanges   UserTimezoneChange[]
-  ownedRooms        Room[]             @relation("RoomOwner")
-  memberships       RoomMember[]
-  createdTasks      RoomTask[]         @relation("TaskCreatedBy")
-  updatedTasks      RoomTask[]         @relation("TaskUpdatedBy")
-  completedTasks    RoomTask[]         @relation("TaskCompletedBy")
-  sessions          StudySession[]
-  segments          StudySegment[]
-  breaks            BreakPeriod[]
-  sessionEvents     SessionEvent[]
-  dailyTotals       DailyStudyTotal[]
-  streak            UserStreak?
+  refreshTokens  RefreshToken[]
+  roomsCreated   Room[]         @relation("RoomCreatedBy")
+  memberships    RoomMember[]
+  tasks          Task[]         @relation("TaskOwner")
+  tasksCompleted Task[]         @relation("TaskCompletedBy")
+  sessions       StudySession[]
+  segments       StudySegment[]
+  breaks         StudyBreak[]
+  sessionEvents  SessionEvent[]
 
   @@map("users")
 }
@@ -213,7 +202,7 @@ model RefreshToken {
   id           String    @id @default(uuid()) @db.Uuid
   userId       String    @map("user_id") @db.Uuid
   familyId     String    @map("family_id") @db.Uuid
-  tokenHash    String    @unique @map("token_hash") @db.Char(64) // SHA-256 hex of the opaque token
+  tokenHash    String    @unique @map("token_hash") @db.Char(64) // SHA-256 hex
   expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
   revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
   replacedById String?   @map("replaced_by_id") @db.Uuid
@@ -227,182 +216,137 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
-model UserTimezoneChange {
-  id           String   @id @default(uuid()) @db.Uuid
-  userId       String   @map("user_id") @db.Uuid
-  fromTimezone String   @map("from_timezone") @db.VarChar(64)
-  toTimezone   String   @map("to_timezone") @db.VarChar(64)
-  changedAt    DateTime @default(now()) @map("changed_at") @db.Timestamptz(3)
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, changedAt])
-  @@map("user_timezone_changes")
-}
-
-// ───────────────────────────── Rooms ─────────────────────────────
-// NOTE (R1/R2): rooms carry NO timer state. Never add timer columns here.
+// ───────────────────────── Rooms ─────────────────────────
+// R2: rooms carry NO timer state. Never add timer columns here.
 
 model Room {
-  id          String         @id @default(uuid()) @db.Uuid
-  name        String         @db.VarChar(80)
-  description String?        @db.VarChar(500)
-  visibility  RoomVisibility @default(PRIVATE)
-  inviteCode  String         @unique @map("invite_code") @db.VarChar(16)
-  ownerId     String         @map("owner_id") @db.Uuid
-  maxMembers  Int            @default(50) @map("max_members")
-  memberCount Int            @default(0) @map("member_count")
-  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
-  archivedAt  DateTime?      @map("archived_at") @db.Timestamptz(3)
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @db.VarChar(60)
+  code        String   @unique @db.Char(6) // ^[A-HJ-NP-Z2-9]{6}$ (CHECK)
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  owner    User           @relation("RoomOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  members  RoomMember[]
-  tasks    RoomTask[]
-  sessions StudySession[]
-  segments StudySegment[]
+  createdBy User           @relation("RoomCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  members   RoomMember[]
+  tasks     Task[]
+  sessions  StudySession[]
+  segments  StudySegment[]
 
-  @@index([visibility, archivedAt, createdAt])
-  @@index([ownerId])
   @@map("rooms")
 }
 
 model RoomMember {
   roomId        String    @map("room_id") @db.Uuid
   userId        String    @map("user_id") @db.Uuid
-  role          RoomRole  @default(MEMBER)
   joinedAt      DateTime  @default(now()) @map("joined_at") @db.Timestamptz(3)
   lastVisitedAt DateTime? @map("last_visited_at") @db.Timestamptz(3)
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  room Room @relation(fields: [roomId], references: [id], onDelete: Restrict)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@id([roomId, userId])
-  @@index([userId])
+  @@id([roomId, userId]) // spec: unique together
+  @@index([userId, lastVisitedAt(sort: Desc)])
   @@map("room_members")
 }
 
-model RoomTask {
-  id            String     @id @db.Uuid // client may supply (idempotent create)
-  roomId        String     @map("room_id") @db.Uuid
+// ───────────────────────── Tasks ─────────────────────────
+
+model Task {
+  id            String     @id @db.Uuid // client-generated → idempotent task_add
+  userId        String     @map("user_id") @db.Uuid // personal: owner · room: creator
+  roomId        String?    @map("room_id") @db.Uuid // NULL = personal
   title         String     @db.VarChar(200)
-  notes         String?    @db.VarChar(2000)
+  description   String?    @db.VarChar(2000)
   status        TaskStatus @default(TODO)
-  position      String     @db.VarChar(64) // fractional index key; column collation "C" (§5)
+  dueDate       DateTime?  @map("due_date") @db.Date // calendar date, no timezone
   version       Int        @default(1)
-  createdById   String     @map("created_by_id") @db.Uuid
-  updatedById   String     @map("updated_by_id") @db.Uuid
-  completedById String?    @map("completed_by_id") @db.Uuid
   completedAt   DateTime?  @map("completed_at") @db.Timestamptz(3)
+  completedById String?    @map("completed_by_id") @db.Uuid
   createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
   deletedAt     DateTime?  @map("deleted_at") @db.Timestamptz(3)
 
-  room        Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  createdBy   User  @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
-  updatedBy   User  @relation("TaskUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
-  completedBy User? @relation("TaskCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  user        User           @relation("TaskOwner", fields: [userId], references: [id], onDelete: Cascade)
+  room        Room?          @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  completedBy User?          @relation("TaskCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  sessions    StudySession[]
 
-  // ordered-list index is a partial index (§5)
-  @@map("room_tasks")
+  // partial indexes in §5
+  @@map("tasks")
 }
 
-// ───────────────────────────── Timer ─────────────────────────────
+// ───────────────────────── Timer ─────────────────────────
 
 model StudySession {
-  id                   String            @id @default(uuid()) @db.Uuid
-  userId               String            @map("user_id") @db.Uuid
-  roomId               String?           @map("room_id") @db.Uuid // null = solo [Q6]
-  status               SessionStatus
-  statusChangedAt      DateTime          @map("status_changed_at") @db.Timestamptz(3) // "since" shown to the user & room
-  timezone             String            @db.VarChar(64) // user tz at session start (info)
-  startedAt            DateTime          @map("started_at") @db.Timestamptz(3)
-  endedAt              DateTime?         @map("ended_at") @db.Timestamptz(3)
-  endReason            SessionEndReason? @map("end_reason")
-
-  // STUDYING
-  segmentStartedAt     DateTime?         @map("segment_started_at") @db.Timestamptz(3)
-  studyMsClosed        Int               @default(0) @map("study_ms_closed")
-
-  // PAUSED
-  pausedAt             DateTime?         @map("paused_at") @db.Timestamptz(3)
-  pauseReason          PauseReason?      @map("pause_reason")
-
-  // ON_BREAK
-  breakDurationMinutes Int?              @map("break_duration_minutes")
-  breakStartedAt       DateTime?         @map("break_started_at") @db.Timestamptz(3)
-  breakEndsAt          DateTime?         @map("break_ends_at") @db.Timestamptz(3)
-  lastBreakEndedAt     DateTime?         @map("last_break_ended_at") @db.Timestamptz(3)
-  breakMsClosed        Int               @default(0) @map("break_ms_closed")
-
-  // Idle (R10)
-  lastActivityAt       DateTime          @map("last_activity_at") @db.Timestamptz(3)
-  idleDeadlineAt       DateTime?         @map("idle_deadline_at") @db.Timestamptz(3)
-
-  // Connection / grace (R9)
-  lastSeenAt           DateTime          @map("last_seen_at") @db.Timestamptz(3)
-  disconnectedAt       DateTime?         @map("disconnected_at") @db.Timestamptz(3)
-  graceExpiresAt       DateTime?         @map("grace_expires_at") @db.Timestamptz(3)
-
-  // Scheduling & concurrency
-  nextDeadlineAt       DateTime?         @map("next_deadline_at") @db.Timestamptz(3)
-  version              Int               @default(1)
-  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt            DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id                      String            @id @default(uuid()) @db.Uuid
+  userId                  String            @map("user_id") @db.Uuid
+  roomId                  String?           @map("room_id") @db.Uuid // NULL = solo
+  taskId                  String?           @map("task_id") @db.Uuid // NULL = none
+  status                  SessionStatus     @default(ACTIVE)
+  startedAt               DateTime          @map("started_at") @db.Timestamptz(3)
+  endedAt                 DateTime?         @map("ended_at") @db.Timestamptz(3)
+  endReason               SessionEndReason? @map("end_reason")
+  currentSegmentStartedAt DateTime?         @map("current_segment_started_at") @db.Timestamptz(3) // non-null iff STUDYING
+  breakEndsAt             DateTime?         @map("break_ends_at") @db.Timestamptz(3) // non-null iff ON_BREAK or BREAK_OVER
+  lastSeenAt              DateTime          @map("last_seen_at") @db.Timestamptz(3) // liveness lease
+  disconnectedAt          DateTime?         @map("disconnected_at") @db.Timestamptz(3) // grace started
+  summarySeenAt           DateTime?         @map("summary_seen_at") @db.Timestamptz(3)
+  version                 Int               @default(1)
+  createdAt               DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  room     Room?          @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  room     Room?          @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  task     Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
   segments StudySegment[]
-  breaks   BreakPeriod[]
+  breaks   StudyBreak[]
   events   SessionEvent[]
 
   @@index([userId, startedAt(sort: Desc)])
   @@index([roomId])
-  // partial indexes for one-active-session, sweeper and lease: see §5
+  // one-ACTIVE-per-user + sweeper/lease partial indexes in §5
   @@map("study_sessions")
 }
 
 model StudySegment {
-  id         String            @id @default(uuid()) @db.Uuid
-  sessionId  String            @map("session_id") @db.Uuid
-  userId     String            @map("user_id") @db.Uuid
-  roomId     String?           @map("room_id") @db.Uuid
-  timezone   String            @db.VarChar(64) // snapshot for local-day attribution [Q13]
-  startedAt  DateTime          @map("started_at") @db.Timestamptz(3)
-  endedAt    DateTime?         @map("ended_at") @db.Timestamptz(3)
-  durationMs Int?              @map("duration_ms")
-  endReason  SegmentEndReason? @map("end_reason")
-  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  id        String            @id @default(uuid()) @db.Uuid
+  sessionId String            @map("session_id") @db.Uuid
+  userId    String            @map("user_id") @db.Uuid
+  roomId    String?           @map("room_id") @db.Uuid // snapshot: NULL = solo study
+  timezone  String            @db.VarChar(64) // snapshot of users.timezone at segment start (I-10)
+  startedAt DateTime          @map("started_at") @db.Timestamptz(3)
+  endedAt   DateTime?         @map("ended_at") @db.Timestamptz(3) // NULL = currently studying
+  endReason SegmentEndReason? @map("end_reason")
+  createdAt DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
 
   session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  room    Room?        @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  room    Room?        @relation(fields: [roomId], references: [id], onDelete: Restrict)
 
   @@index([userId, startedAt])
-  @@index([sessionId, startedAt])
   @@index([roomId, startedAt])
+  @@index([sessionId, startedAt])
   @@map("study_segments")
 }
 
-model BreakPeriod {
-  id              String          @id @default(uuid()) @db.Uuid
-  sessionId       String          @map("session_id") @db.Uuid
-  userId          String          @map("user_id") @db.Uuid
-  timezone        String          @db.VarChar(64)
-  durationMinutes Int             @map("duration_minutes") // CHECK IN (5,10,15,30)
-  startedAt       DateTime        @map("started_at") @db.Timestamptz(3)
-  scheduledEndAt  DateTime        @map("scheduled_end_at") @db.Timestamptz(3)
-  endedAt         DateTime?       @map("ended_at") @db.Timestamptz(3)
-  actualMs        Int?            @map("actual_ms")
-  endReason       BreakEndReason? @map("end_reason")
-  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+model StudyBreak {
+  id              String            @id @default(uuid()) @db.Uuid
+  sessionId       String            @map("session_id") @db.Uuid
+  userId          String            @map("user_id") @db.Uuid
+  durationMinutes Int               @map("duration_minutes") // 5 | 10 | 15 | 30 (CHECK)
+  startedAt       DateTime          @map("started_at") @db.Timestamptz(3)
+  endsAt          DateTime          @map("ends_at") @db.Timestamptz(3) // = started_at + duration (CHECK)
+  closedAt        DateTime?         @map("closed_at") @db.Timestamptz(3) // resume / end / auto-save
+  closeReason     BreakCloseReason? @map("close_reason")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
 
   session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, startedAt])
   @@index([sessionId, startedAt])
-  @@map("break_periods")
+  @@index([userId, startedAt])
+  @@map("study_breaks")
 }
 
 model SessionEvent {
@@ -411,295 +355,332 @@ model SessionEvent {
   userId     String           @map("user_id") @db.Uuid
   type       SessionEventType
   actor      EventActor
-  fromStatus SessionStatus?   @map("from_status")
-  toStatus   SessionStatus    @map("to_status")
+  fromPhase  TimerPhase       @map("from_phase")
+  toPhase    TimerPhase       @map("to_phase")
   occurredAt DateTime         @map("occurred_at") @db.Timestamptz(3) // deadline instant for SYSTEM events
   recordedAt DateTime         @default(now()) @map("recorded_at") @db.Timestamptz(3)
-  commandId  String?          @map("command_id") @db.Uuid // USER commands only
+  commandId  String?          @map("command_id") @db.Uuid
   payload    Json?
 
   session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, commandId]) // idempotency (NULLs are distinct)
+  @@unique([userId, commandId]) // idempotency; NULLs are distinct
   @@index([sessionId, id])
   @@index([recordedAt])
   @@map("session_events")
 }
-
-// ───────────────────────────── Accounting ─────────────────────────────
-
-model DailyStudyTotal {
-  userId      String    @map("user_id") @db.Uuid
-  localDate   DateTime  @map("local_date") @db.Date // calendar date in segment's tz
-  studyMs     Int       @default(0) @map("study_ms")
-  breakMs     Int       @default(0) @map("break_ms")
-  qualifiedAt DateTime? @map("qualified_at") @db.Timestamptz(3) // when study_ms first reached 1,500,000
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@id([userId, localDate])
-  @@map("daily_study_totals")
-}
-
-model UserStreak {
-  userId             String    @id @map("user_id") @db.Uuid
-  currentStreak      Int       @default(0) @map("current_streak")     // as of last_qualified_date
-  currentStreakStart DateTime? @map("current_streak_start") @db.Date
-  lastQualifiedDate  DateTime? @map("last_qualified_date") @db.Date
-  longestStreak      Int       @default(0) @map("longest_streak")
-  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("user_streaks")
-}
 ```
 
-**Prisma `@db.Date` caveat:** Prisma maps `date` to a JS `Date` at UTC midnight. The
-repository layer converts it to and from `YYYY-MM-DD` strings immediately. A `Date` object
-holding a local date never leaves the repository.
+**Prisma `@db.Date` caveat:** `due_date` maps to a JS `Date` at UTC midnight. The repository
+converts it to and from `YYYY-MM-DD` immediately, so no `Date` holding a calendar date leaves
+the repository.
 
 ---
 
-## 5. Constraints Prisma cannot express (hand-written SQL)
+## 5. Hand-written constraints and indexes
 
-Added through `prisma migrate dev --create-only`, followed by appending the SQL to the
-generated migration. Every object is explicitly named and checked by the schema-invariants
-test (§9).
+Appended to migrations created with `prisma migrate dev --create-only`. Every object is named
+and asserted by the `INT-SCHEMA` test. **Validated on PostgreSQL 16:** each constraint accepts
+valid rows and rejects the violation it targets.
 
 ```sql
--- Extensions
-CREATE EXTENSION IF NOT EXISTS btree_gist;   -- uuid equality inside GiST exclusion constraints
+CREATE EXTENSION IF NOT EXISTS btree_gist;  -- uuid equality inside GiST exclusion constraints
 
 -- ─── users ───
 ALTER TABLE users
   ADD CONSTRAINT users_email_lowercase CHECK (email = lower(email)),
-  ADD CONSTRAINT users_display_name_not_blank CHECK (length(btrim(display_name)) > 0);
+  ADD CONSTRAINT users_name_not_blank  CHECK (length(btrim(name)) > 0);
 
--- ─── rooms ───
+-- ─── rooms ───  (F-13: 6 chars, no O/0/I/1)
 ALTER TABLE rooms
-  ADD CONSTRAINT rooms_name_not_blank       CHECK (length(btrim(name)) > 0),
-  ADD CONSTRAINT rooms_max_members_range    CHECK (max_members BETWEEN 2 AND 200),
-  ADD CONSTRAINT rooms_member_count_range   CHECK (member_count >= 0 AND member_count <= max_members);
+  ADD CONSTRAINT rooms_code_format    CHECK (code ~ '^[A-HJ-NP-Z2-9]{6}$'),
+  ADD CONSTRAINT rooms_name_not_blank CHECK (length(btrim(name)) > 0);
 
--- At most one OWNER membership row per room (rooms.owner_id is canonical; kept in sync transactionally)
-CREATE UNIQUE INDEX room_members_one_owner ON room_members (room_id) WHERE role = 'OWNER';
-
--- ─── room_tasks ───
-ALTER TABLE room_tasks ALTER COLUMN position TYPE varchar(64) COLLATE "C"; -- byte order = fractional-index order
-ALTER TABLE room_tasks
-  ADD CONSTRAINT room_tasks_title_not_blank CHECK (length(btrim(title)) > 0),
-  ADD CONSTRAINT room_tasks_done_consistent CHECK ((status = 'DONE') = (completed_at IS NOT NULL)),
-  ADD CONSTRAINT room_tasks_version_positive CHECK (version >= 1);
-CREATE UNIQUE INDEX room_tasks_room_position_live
-  ON room_tasks (room_id, position) WHERE deleted_at IS NULL;
+-- ─── tasks ───
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_title_not_blank CHECK (length(btrim(title)) > 0),
+  ADD CONSTRAINT tasks_done_consistent CHECK (
+    (status = 'DONE') = (completed_at IS NOT NULL) AND (status = 'DONE') = (completed_by_id IS NOT NULL)),
+  ADD CONSTRAINT tasks_version_positive CHECK (version >= 1);
+CREATE INDEX tasks_personal_live ON tasks (user_id, created_at) WHERE room_id IS NULL AND deleted_at IS NULL;
+CREATE INDEX tasks_room_live     ON tasks (room_id, created_at) WHERE room_id IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX tasks_completed_by  ON tasks (completed_by_id, completed_at) WHERE completed_at IS NOT NULL;
 
 -- ─── study_sessions ───
--- R6: one active session per user
-CREATE UNIQUE INDEX study_sessions_one_active_per_user
-  ON study_sessions (user_id) WHERE status <> 'ENDED';
-
--- Sweeper: due deadlines
-CREATE INDEX study_sessions_due
-  ON study_sessions (next_deadline_at) WHERE status <> 'ENDED';
-
--- Liveness lease: candidates for LEASE_LOST
-CREATE INDEX study_sessions_lease
-  ON study_sessions (last_seen_at) WHERE status <> 'ENDED' AND disconnected_at IS NULL;
+-- R6 / F-17: one ACTIVE session per user, ever
+CREATE UNIQUE INDEX study_sessions_one_active_per_user ON study_sessions (user_id) WHERE status = 'ACTIVE';
+-- sweeper: idle deadline (break_ends_at + 30 min), grace deadline (disconnected_at + 2 min), stale lease
+CREATE INDEX study_sessions_break_deadline ON study_sessions (break_ends_at)   WHERE status = 'ACTIVE' AND break_ends_at IS NOT NULL;
+CREATE INDEX study_sessions_grace_deadline ON study_sessions (disconnected_at) WHERE status = 'ACTIVE' AND disconnected_at IS NOT NULL;
+CREATE INDEX study_sessions_lease          ON study_sessions (last_seen_at)    WHERE status = 'ACTIVE' AND disconnected_at IS NULL;
 
 ALTER TABLE study_sessions
   ADD CONSTRAINT ss_ended_consistent CHECK (
     (status = 'ENDED') = (ended_at IS NOT NULL) AND (status = 'ENDED') = (end_reason IS NOT NULL)),
-  ADD CONSTRAINT ss_studying_consistent CHECK (
-    (status = 'STUDYING') = (segment_started_at IS NOT NULL)),
-  ADD CONSTRAINT ss_paused_consistent CHECK (
-    (status = 'PAUSED') = (paused_at IS NOT NULL) AND (status = 'PAUSED') = (pause_reason IS NOT NULL)),
-  ADD CONSTRAINT ss_break_consistent CHECK (
-    (status = 'ON_BREAK' AND break_duration_minutes IS NOT NULL AND break_started_at IS NOT NULL AND break_ends_at IS NOT NULL)
-    OR (status <> 'ON_BREAK' AND break_duration_minutes IS NULL AND break_started_at IS NULL AND break_ends_at IS NULL)),
-  ADD CONSTRAINT ss_break_duration_allowed CHECK (           -- R4
-    break_duration_minutes IS NULL OR break_duration_minutes IN (5, 10, 15, 30)),
-  ADD CONSTRAINT ss_break_end_exact CHECK (
-    break_ends_at IS NULL OR break_ends_at = break_started_at + break_duration_minutes * interval '1 minute'),
-  ADD CONSTRAINT ss_idle_deadline_consistent CHECK (         -- idle clock suspended on break
-    (status IN ('ON_BREAK', 'ENDED')) = (idle_deadline_at IS NULL)),
-  ADD CONSTRAINT ss_grace_consistent CHECK (                 -- R9: exactly 2 minutes
-    (disconnected_at IS NULL AND grace_expires_at IS NULL)
-    OR (disconnected_at IS NOT NULL AND grace_expires_at = disconnected_at + interval '2 minutes')),
-  ADD CONSTRAINT ss_ms_non_negative CHECK (study_ms_closed >= 0 AND break_ms_closed >= 0),
+  -- the four-state model at row level: an ACTIVE session is studying XOR on a break (ON_BREAK/BREAK_OVER)
+  ADD CONSTRAINT ss_active_phase_xor CHECK (
+    status <> 'ACTIVE' OR ((current_segment_started_at IS NULL) <> (break_ends_at IS NULL))),
+  ADD CONSTRAINT ss_ended_clean CHECK (
+    status <> 'ENDED' OR (current_segment_started_at IS NULL AND break_ends_at IS NULL AND disconnected_at IS NULL)),
+  ADD CONSTRAINT ss_time_order CHECK (ended_at IS NULL OR ended_at >= started_at),
   ADD CONSTRAINT ss_version_positive CHECK (version >= 1);
 
 -- ─── study_segments ───
 CREATE UNIQUE INDEX study_segments_one_open_per_session ON study_segments (session_id) WHERE ended_at IS NULL;
 CREATE UNIQUE INDEX study_segments_one_open_per_user    ON study_segments (user_id)    WHERE ended_at IS NULL;
-
 ALTER TABLE study_segments
-  ADD CONSTRAINT seg_close_consistent CHECK (
-    (ended_at IS NULL AND duration_ms IS NULL AND end_reason IS NULL)
-    OR (ended_at IS NOT NULL AND duration_ms IS NOT NULL AND end_reason IS NOT NULL)),
-  ADD CONSTRAINT seg_order CHECK (ended_at IS NULL OR ended_at >= started_at),
-  ADD CONSTRAINT seg_duration_exact CHECK (
-    ended_at IS NULL OR duration_ms = (EXTRACT(EPOCH FROM (ended_at - started_at)) * 1000)::int),
-  -- No two study intervals of the same user may overlap (half-open ranges; open segment = unbounded)
+  ADD CONSTRAINT seg_close_consistent CHECK ((ended_at IS NULL) = (end_reason IS NULL)),
+  ADD CONSTRAINT seg_time_order       CHECK (ended_at IS NULL OR ended_at >= started_at),
+  -- no two study blocks of one user overlap (half-open; open segment = unbounded)
   ADD CONSTRAINT seg_no_overlap_per_user EXCLUDE USING gist (
     user_id WITH =, tstzrange(started_at, ended_at, '[)') WITH &&);
 
--- ─── break_periods ───
-CREATE UNIQUE INDEX break_periods_one_open_per_session ON break_periods (session_id) WHERE ended_at IS NULL;
-
-ALTER TABLE break_periods
-  ADD CONSTRAINT brk_duration_allowed CHECK (duration_minutes IN (5, 10, 15, 30)),        -- R4
-  ADD CONSTRAINT brk_schedule_exact   CHECK (scheduled_end_at = started_at + duration_minutes * interval '1 minute'),
-  ADD CONSTRAINT brk_close_consistent CHECK (
-    (ended_at IS NULL AND actual_ms IS NULL AND end_reason IS NULL)
-    OR (ended_at IS NOT NULL AND actual_ms IS NOT NULL AND end_reason IS NOT NULL)),
-  ADD CONSTRAINT brk_within_schedule  CHECK (ended_at IS NULL OR (ended_at >= started_at AND ended_at <= scheduled_end_at)),
-  ADD CONSTRAINT brk_actual_exact     CHECK (
-    ended_at IS NULL OR actual_ms = (EXTRACT(EPOCH FROM (ended_at - started_at)) * 1000)::int),
+-- ─── study_breaks ───
+CREATE UNIQUE INDEX study_breaks_one_open_per_session ON study_breaks (session_id) WHERE closed_at IS NULL;
+ALTER TABLE study_breaks
+  ADD CONSTRAINT brk_duration_allowed CHECK (duration_minutes IN (5, 10, 15, 30)),                      -- R4
+  ADD CONSTRAINT brk_ends_exact       CHECK (ends_at = started_at + duration_minutes * interval '1 minute'),
+  ADD CONSTRAINT brk_close_consistent CHECK ((closed_at IS NULL) = (close_reason IS NULL)),
+  -- R10: a break (incl. Break Over waiting) can never outlive ends_at + 30 min
+  ADD CONSTRAINT brk_close_window CHECK (
+    closed_at IS NULL OR (closed_at >= started_at AND closed_at <= ends_at + interval '30 minutes')),
+  -- R5: Resume is only possible once the countdown has finished
+  ADD CONSTRAINT brk_resume_only_after_end CHECK (close_reason IS DISTINCT FROM 'RESUMED' OR closed_at >= ends_at),
+  -- R10: idle auto-save happens exactly 30 min after the countdown ends
+  ADD CONSTRAINT brk_idle_exact CHECK (close_reason IS DISTINCT FROM 'IDLE_TIMEOUT' OR closed_at = ends_at + interval '30 minutes'),
   ADD CONSTRAINT brk_no_overlap_per_user EXCLUDE USING gist (
-    user_id WITH =, tstzrange(started_at, ended_at, '[)') WITH &&);
+    user_id WITH =, tstzrange(started_at, closed_at, '[)') WITH &&);
 
 -- ─── session_events ───
 ALTER TABLE session_events
+  ADD CONSTRAINT evt_actor_matches_type CHECK (
+    (type IN ('STARTED', 'BREAK_TAKEN', 'RESUMED', 'ENDED', 'MOVED_TO_ROOM', 'TASK_SET')) = (actor = 'USER')),
   ADD CONSTRAINT evt_command_only_for_user CHECK (command_id IS NULL OR actor = 'USER'),
-  -- R5: only users can (re)enter STUDYING. SYSTEM events may keep a session in STUDYING
-  -- (e.g. RECONNECTED, DISCONNECTED) but can never move it INTO STUDYING.
-  ADD CONSTRAINT evt_no_system_resume CHECK (
-    actor = 'USER'
-    OR (type NOT IN ('STARTED', 'RESUMED')
-        AND (to_status <> 'STUDYING' OR from_status = 'STUDYING')));
-
--- ─── daily_study_totals ───
-ALTER TABLE daily_study_totals
-  ADD CONSTRAINT dst_study_range CHECK (study_ms BETWEEN 0 AND 90000000),  -- ≤ 25 h (DST fall-back day)
-  ADD CONSTRAINT dst_break_range CHECK (break_ms BETWEEN 0 AND 90000000);
-
--- ─── user_streaks ───
-ALTER TABLE user_streaks
-  ADD CONSTRAINT streak_non_negative CHECK (current_streak >= 0 AND longest_streak >= current_streak);
+  -- R5: a SYSTEM event may keep a session in STUDYING (e.g. RECONNECTED) but never move it INTO STUDYING
+  ADD CONSTRAINT evt_no_system_resume CHECK (actor = 'USER' OR to_phase <> 'STUDYING' OR from_phase = 'STUDYING');
 ```
 
-**Cross-table guarantee (R3: break never overlaps study).** PostgreSQL cannot express an
-exclusion constraint across two tables. It is guaranteed by the state machine (the segment
-closes at *t*, and the break opens at the same *t*), by property-based tests, and by audit query
-§8-A run in the test suite and nightly. *Alternative considered:* a single `session_intervals`
-table with a `kind` column and one exclusion constraint. It was rejected for clarity of the
-break-specific columns, and can be revisited if the spec demands DB-level enforcement.
+**Cross-table guarantees.** "A segment never overlaps a break" (R3) and "an ACTIVE session's
+open segment matches `current_segment_started_at`" span two tables, which PostgreSQL CHECK
+constraints cannot express. They are guaranteed by the state machine (all writes happen in one
+transaction under the per-user lock) and verified by the audit queries in §8. Those queries run
+after every integration test and nightly.
 
-**Database-level settings** (run once per database by `scripts/dev-db.sh` and by the deployment
-setup):
-
-```sql
-ALTER DATABASE studysync_dev SET timezone TO 'UTC';
-```
+**Database setting** (by `scripts/dev-db.sh` and the deployment setup): `ALTER DATABASE <db> SET timezone TO 'UTC';`
 
 ---
 
 ## 6. Key queries
 
-### 6.1 Credit study time to a local day (atomic, inside the transition transaction)
+Time math runs in SQL so there is one aggregation engine. All instants are passed as
+parameters from the app `Clock` (`$now`), never `now()`, so tests are deterministic.
+
+### 6.1 Daily totals with midnight splitting (F-35, F-38): Solo / Rooms / Total
 
 ```sql
-INSERT INTO daily_study_totals (user_id, local_date, study_ms, break_ms, updated_at)
-VALUES ($1, $2::date, $3, 0, now())
-ON CONFLICT (user_id, local_date)
-DO UPDATE SET study_ms   = daily_study_totals.study_ms + EXCLUDED.study_ms,
-              updated_at = now()
-RETURNING study_ms;
--- app: previous = returned − $3; if previous < 1500000 ≤ returned → set qualified_at, recompute streak
-```
-
-The split into `(local_date, ms)` pieces happens in the app (`packages/shared/src/time/splitByLocalDay.ts`, Luxon).
-
-### 6.2 Sweeper: due sessions (multi-instance safe)
-
-```sql
--- 1) find candidates (no lock)
-SELECT id FROM study_sessions
-WHERE status <> 'ENDED' AND next_deadline_at <= $1
-ORDER BY next_deadline_at
-LIMIT 100;
-
--- 2) per candidate, in its own transaction
-SELECT * FROM study_sessions WHERE id = $1 FOR UPDATE SKIP LOCKED;  -- none → another worker owns it
--- … reconcile(snapshot, now) and persist effects …
-```
-
-### 6.3 Streak recomputation (gaps-and-islands)
-
-```sql
-WITH qualified AS (
-  SELECT local_date
-  FROM daily_study_totals
-  WHERE user_id = $1 AND study_ms >= $2            -- $2 = 1500000
+-- $1 user_id, $2 from local date, $3 to local date, $4 now
+WITH seg AS (
+  SELECT s.room_id, s.timezone AS tz, s.started_at, COALESCE(s.ended_at, $4) AS ended_at
+  FROM study_segments s
+  WHERE s.user_id = $1
+    AND s.started_at < ($3::date + 2)::timestamptz                 -- ±1 day margin covers every UTC offset
+    AND COALESCE(s.ended_at, $4) > ($2::date - 1)::timestamptz
 ),
+pieces AS (
+  SELECT seg.room_id,
+         d.local_day::date AS local_date,
+         GREATEST(seg.started_at, d.local_day AT TIME ZONE seg.tz)                 AS p_start,
+         LEAST(seg.ended_at, (d.local_day + interval '1 day') AT TIME ZONE seg.tz) AS p_end
+  FROM seg
+  CROSS JOIN LATERAL generate_series(
+      date_trunc('day', seg.started_at AT TIME ZONE seg.tz),   -- local midnight of first day
+      date_trunc('day', seg.ended_at   AT TIME ZONE seg.tz),   -- local midnight of last day
+      interval '1 day') AS d(local_day)
+)
+SELECT local_date,
+       SUM(EXTRACT(EPOCH FROM p_end - p_start) * 1000)::bigint                                          AS total_ms,
+       COALESCE(SUM(EXTRACT(EPOCH FROM p_end - p_start) * 1000) FILTER (WHERE room_id IS NULL), 0)::bigint     AS solo_ms,
+       COALESCE(SUM(EXTRACT(EPOCH FROM p_end - p_start) * 1000) FILTER (WHERE room_id IS NOT NULL), 0)::bigint AS rooms_ms
+FROM pieces
+WHERE p_end > p_start AND local_date BETWEEN $2::date AND $3::date
+GROUP BY local_date
+ORDER BY local_date;
+-- app fills missing dates with zeros for charts
+```
+
+**Validated cases** (PostgreSQL 16, conservation of total time asserted):
+
+| Case | Pieces |
+|---|---|
+| Asia/Kolkata 23:30–00:30 | 30 min + 30 min |
+| America/New_York, 26.5 h across fall-back 2026-11-01 | 60 min · **1500 min (25 h)** · 30 min |
+| America/New_York, 25 h across spring-forward 2026-03-08 | 60 min · **1380 min (23 h)** · 60 min |
+| America/Santiago 2026-09-06 (local midnight does not exist) | 30 min + 30 min (boundary = clock-jump instant) |
+| Australia/Lord_Howe 2026-04-05 (30-min DST shift) | **1470 min (24.5 h)** |
+| Segment ending exactly at local midnight | One piece; no zero-length piece |
+| Pacific/Kiritimati vs Pacific/Pago_Pago, same UTC instant | 2026-10-31/11-01 vs 2026-10-30 |
+
+### 6.2 Streak (F-36, F-37): computed, never stored
+
+```sql
+-- $1 user_id, $2 now, $3 threshold_ms (1500000)
+WITH seg AS (
+  SELECT s.timezone AS tz, s.started_at, COALESCE(s.ended_at, $2) AS ended_at
+  FROM study_segments s WHERE s.user_id = $1
+),
+pieces AS ( /* same split as 6.1 */ ),
+daily AS (
+  SELECT local_date, SUM(EXTRACT(EPOCH FROM p_end - p_start) * 1000) AS total_ms
+  FROM pieces WHERE p_end > p_start GROUP BY local_date
+),
+qualified AS (SELECT local_date FROM daily WHERE total_ms >= $3),
 islands AS (
-  SELECT local_date,
-         local_date - (ROW_NUMBER() OVER (ORDER BY local_date))::int AS grp
-  FROM qualified
+  SELECT local_date, local_date - (ROW_NUMBER() OVER (ORDER BY local_date))::int AS grp FROM qualified
 )
 SELECT MIN(local_date) AS run_start, MAX(local_date) AS run_end, COUNT(*)::int AS run_length
-FROM islands
-GROUP BY grp
-ORDER BY run_end DESC;
--- current streak = run_length of the first row if run_end >= yesterday (user's current tz), else 0
--- longest streak = max(run_length)
+FROM islands GROUP BY grp ORDER BY run_end DESC;
+-- app: today = $now in users.timezone (Luxon)
+--   current = first run if run_end = today, or run_end = today − 1 (then atRisk = !todayQualified), else 0
+--   longest = max(run_length)
 ```
 
-### 6.4 Daily chart data
+### 6.3 Today in this room (F-23)
 
 ```sql
-SELECT local_date, study_ms, break_ms, (study_ms >= $4) AS qualified
-FROM daily_study_totals
-WHERE user_id = $1 AND local_date BETWEEN $2::date AND $3::date
-ORDER BY local_date;
--- app fills missing dates with zeros so Recharts gets a continuous series
+-- $1 room_id, $2 now
+WITH members AS (
+  SELECT u.id AS user_id, u.name, ($2 AT TIME ZONE u.timezone)::date AS today   -- each member's own today (I-09)
+  FROM room_members m JOIN users u ON u.id = m.user_id
+  WHERE m.room_id = $1
+),
+seg AS (
+  SELECT s.user_id, s.timezone AS tz, s.started_at, COALESCE(s.ended_at, $2) AS ended_at
+  FROM study_segments s JOIN members mb ON mb.user_id = s.user_id
+  WHERE s.room_id = $1 AND COALESCE(s.ended_at, $2) > $2 - interval '2 days'
+),
+pieces AS (
+  SELECT seg.user_id, d.local_day::date AS local_date,
+         GREATEST(seg.started_at, d.local_day AT TIME ZONE seg.tz)                 AS p_start,
+         LEAST(seg.ended_at, (d.local_day + interval '1 day') AT TIME ZONE seg.tz) AS p_end
+  FROM seg CROSS JOIN LATERAL generate_series(
+      date_trunc('day', seg.started_at AT TIME ZONE seg.tz),
+      date_trunc('day', seg.ended_at   AT TIME ZONE seg.tz), interval '1 day') AS d(local_day)
+)
+SELECT mb.user_id, mb.name,
+       COALESCE(SUM(EXTRACT(EPOCH FROM p.p_end - p.p_start) * 1000)
+                FILTER (WHERE p.local_date = mb.today AND p.p_end > p.p_start), 0)::bigint AS today_ms,
+       ss.current_segment_started_at AS studying_since          -- non-null → client ticks live
+FROM members mb
+LEFT JOIN pieces p ON p.user_id = mb.user_id
+LEFT JOIN study_sessions ss ON ss.user_id = mb.user_id AND ss.status = 'ACTIVE' AND ss.room_id = $1
+GROUP BY mb.user_id, mb.name, ss.current_segment_started_at
+ORDER BY today_ms DESC;
+-- app hides members with today_ms = 0 and studying_since IS NULL
 ```
 
-### 6.5 Session history (keyset pagination)
+### 6.4 Session summary (F-39)
 
 ```sql
-SELECT id, room_id, status, started_at, ended_at, end_reason, study_ms_closed, break_ms_closed
-FROM study_sessions
-WHERE user_id = $1
-  AND (started_at, id) < ($2, $3)        -- cursor (omitted on first page)
-ORDER BY started_at DESC, id DESC
-LIMIT $4;
+-- $1 session_id, $2 user_id, $3 now
+SELECT ss.id, ss.started_at, ss.ended_at, ss.end_reason, r.name AS room_name, t.title AS task_title,
+       (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM COALESCE(g.ended_at, $3) - g.started_at) * 1000), 0)::bigint
+          FROM study_segments g WHERE g.session_id = ss.id)                                   AS studied_ms,
+       (SELECT COUNT(*)::int FROM study_breaks b WHERE b.session_id = ss.id)                   AS break_count,
+       (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM LEAST(COALESCE(b.closed_at, $3), b.ends_at) - b.started_at) * 1000), 0)::bigint
+          FROM study_breaks b WHERE b.session_id = ss.id)                                     AS break_ms,  -- I-12
+       EXISTS (SELECT 1 FROM study_segments g WHERE g.session_id = ss.id AND g.room_id IS NULL) AS had_solo_part
+FROM study_sessions ss
+LEFT JOIN rooms r ON r.id = ss.room_id
+LEFT JOIN tasks t ON t.id = ss.task_id                  -- soft-deleted tasks still resolve (E-22)
+WHERE ss.id = $1 AND ss.user_id = $2;
+
+-- completed during session (I-13)
+SELECT id, title FROM tasks
+WHERE completed_by_id = $2 AND status = 'DONE'
+  AND completed_at >= $started_at AND completed_at <= COALESCE($ended_at, $3)
+ORDER BY completed_at;
 ```
 
-### 6.6 Room task list (ordered)
+### 6.5 Room members with session data (status built with in-memory presence)
 
 ```sql
-SELECT * FROM room_tasks
-WHERE room_id = $1 AND deleted_at IS NULL
-ORDER BY position;          -- "C" collation → byte order matches fractional-index keys
+SELECT m.user_id, u.name, m.joined_at,
+       ss.id AS session_id, ss.room_id AS session_room_id,
+       ss.current_segment_started_at, ss.break_ends_at, ss.disconnected_at
+FROM room_members m
+JOIN users u ON u.id = m.user_id
+LEFT JOIN study_sessions ss ON ss.user_id = m.user_id AND ss.status = 'ACTIVE'
+WHERE m.room_id = $1
+ORDER BY u.name;
 ```
 
-Reorders and appends take `pg_advisory_xact_lock(hashtextextended('room_tasks:' || $roomId, 0))`
-so key generation between neighbors is serialized per room. The partial unique index
-`room_tasks_room_position_live` is the safety net.
-
-### 6.7 Liveness lease
+### 6.6 My Rooms (F-19)
 
 ```sql
--- every 30 s per instance: refresh proof-of-life for connected users
-UPDATE study_sessions SET last_seen_at = $1
-WHERE user_id = ANY($2::uuid[]) AND status <> 'ENDED';
-
--- sweeper: sessions whose holder vanished (→ LEASE_LOST{at: last_seen_at} through the state machine)
-SELECT id FROM study_sessions
-WHERE status <> 'ENDED' AND disconnected_at IS NULL AND last_seen_at < $1 - interval '90 seconds'
-LIMIT 100;
+SELECT r.id, r.name, r.code, m.joined_at, m.last_visited_at
+FROM room_members m JOIN rooms r ON r.id = m.room_id
+WHERE m.user_id = $1
+ORDER BY m.last_visited_at DESC NULLS LAST, m.joined_at DESC;
 ```
 
-### 6.8 Hourly heatmap / per-room breakdown
+### 6.7 Sweeper: auto-save candidates (R9, R10; restart-safe)
 
-Raw segments for the requested range (≤ 366 days) are fetched with
-`WHERE user_id = $1 AND started_at < $to AND (ended_at IS NULL OR ended_at > $from)`, then
-split per local hour or grouped by `room_id` in the app with the same Luxon helpers
-(consistent DST handling).
+```sql
+-- $1 now
+SELECT id, user_id FROM study_sessions
+WHERE status = 'ACTIVE' AND (
+       (disconnected_at IS NOT NULL AND disconnected_at <= $1::timestamptz - interval '2 minutes')            -- grace expired
+    OR (current_segment_started_at IS NULL AND break_ends_at <= $1::timestamptz - interval '30 minutes')      -- idle in Break Over
+    OR (disconnected_at IS NULL AND last_seen_at < $1::timestamptz - interval '90 seconds'))                  -- lease stale (crash)
+LIMIT 200;
+-- per candidate, own transaction:
+--   SELECT pg_try_advisory_xact_lock(<user key>)   → false: a command is running, skip this round
+--   SELECT … FROM study_sessions WHERE id = $id AND status = 'ACTIVE' FOR UPDATE SKIP LOCKED
+--   reconcile(session, now)  → effects stamped at the deadline instant
+```
+
+### 6.8 Liveness lease refresh (every 30 s per instance)
+
+```sql
+-- $1 now, $2 users with ≥1 socket on this instance, $3/$4 (user, present room) pairs on this instance
+UPDATE study_sessions s SET last_seen_at = $1
+WHERE s.status = 'ACTIVE' AND s.disconnected_at IS NULL
+  AND (   (s.room_id IS NULL     AND s.user_id = ANY($2::uuid[]))
+       OR (s.room_id IS NOT NULL AND (s.user_id, s.room_id) IN (
+             SELECT p.u, p.r FROM unnest($3::uuid[], $4::uuid[]) AS p(u, r))));
+```
+
+### 6.9 Break-end pushes to reschedule at boot
+
+```sql
+SELECT id, user_id, room_id, break_ends_at FROM study_sessions
+WHERE status = 'ACTIVE' AND current_segment_started_at IS NULL AND break_ends_at > $1::timestamptz;
+```
+
+### 6.10 History list (keyset pagination)
+
+```sql
+SELECT ss.id, ss.room_id, r.name AS room_name, ss.started_at, ss.ended_at, ss.end_reason,
+       (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM COALESCE(g.ended_at, $4) - g.started_at) * 1000), 0)::bigint
+          FROM study_segments g WHERE g.session_id = ss.id) AS studied_ms
+FROM study_sessions ss LEFT JOIN rooms r ON r.id = ss.room_id
+WHERE ss.user_id = $1 AND (ss.started_at, ss.id) < ($2, $3)   -- cursor omitted on first page
+ORDER BY ss.started_at DESC, ss.id DESC
+LIMIT 20;
+```
+
+### 6.11 Heatmap (Phase 4): local weekday × hour
+
+Same split as 6.1, using `generate_series(date_trunc('hour', … AT TIME ZONE tz), …, interval '1 hour')`
+and grouping by `EXTRACT(ISODOW FROM local_hour)`, `EXTRACT(HOUR FROM local_hour)`. Total time
+is conserved. On a fall-back day the repeated local hour is folded into the preceding hour
+bucket, which is acceptable for a heatmap (one hour, once a year).
+
+### 6.12 Weekly / monthly (Phase 3)
+
+6.1 over the requested range, grouped by `date_trunc('week', local_date)` (ISO weeks, Monday
+start) or `date_trunc('month', local_date)`.
 
 ---
 
@@ -707,122 +688,132 @@ split per local hour or grouped by `room_id` in the app with the same Luxon help
 
 | Index | Serves |
 |---|---|
-| `users(email)` unique | Login lookup, uniqueness |
-| `refresh_tokens(token_hash)` unique | Refresh lookup |
-| `refresh_tokens(family_id)` | Family revocation on reuse |
-| `rooms(invite_code)` unique | Join by code |
-| `rooms(visibility, archived_at, created_at)` | Public room discovery |
-| `room_members(user_id)` | "My rooms" |
-| `room_tasks_room_position_live` (partial unique) | Ordered list read + no duplicate positions |
-| `study_sessions_one_active_per_user` (partial unique) | **R6** + fast active-session lookup |
-| `study_sessions_due` (partial) | Sweeper |
-| `study_sessions_lease` (partial) | Lease-lost detection |
-| `study_sessions(user_id, started_at DESC)` | History pagination |
-| `study_segments(user_id, started_at)` | Heatmap / range scans |
-| `study_segments(room_id, started_at)` | Per-room analytics |
-| `seg_no_overlap_per_user` (GiST) | **R3** defense-in-depth; also serves range-overlap queries |
+| `study_sessions_one_active_per_user` (partial unique) | **R6** + `session_state` lookup |
+| `study_sessions_break_deadline` / `_grace_deadline` / `_lease` (partial) | Sweeper (6.7) and boot rescheduling (6.9) |
+| `study_sessions(user_id, started_at DESC)` | History (6.10) |
+| `study_segments(user_id, started_at)` | Daily totals, streak, heatmap |
+| `study_segments(room_id, started_at)` | Today in this room, room history |
+| `study_segments(session_id, started_at)` | Session totals and summary |
+| `study_segments_one_open_per_session` / `_per_user` (partial unique) | Exactly one running block |
+| `seg_no_overlap_per_user` / `brk_no_overlap_per_user` (GiST) | **R3** defense-in-depth |
+| `study_breaks_one_open_per_session` (partial unique) | One current break |
+| `rooms(code)` unique | Join by code, **R17** |
+| `room_members` PK `(room_id, user_id)` / `(user_id, last_visited_at DESC)` | Membership check / My Rooms |
+| `tasks_personal_live` / `tasks_room_live` (partial) | Task lists |
+| `tasks_completed_by` (partial) | "Completed during session" |
 | `session_events(user_id, command_id)` unique | Idempotency |
-| `session_events(session_id, id)` | Session timeline |
-| `session_events(recorded_at)` | Retention purge |
-| `daily_study_totals` PK `(user_id, local_date)` | Upsert target, chart ranges, streak |
+| `refresh_tokens(token_hash)` unique, `(family_id)` | Refresh, reuse revocation |
 
 ---
 
-## 8. Invariants & audit queries
+## 8. Invariant audit queries
 
-Run in integration tests after every scenario, and nightly in production (log/alert on any row).
+Run after every integration, concurrency and realtime test, and nightly in production. **Any
+returned row is a bug.**
 
 ```sql
 -- A. R3: no study segment overlaps a break of the same user
-SELECT s.id AS segment_id, b.id AS break_id
-FROM study_segments s
-JOIN break_periods b ON b.user_id = s.user_id
- AND tstzrange(s.started_at, s.ended_at, '[)') && tstzrange(b.started_at, b.ended_at, '[)');
+SELECT g.id AS segment_id, b.id AS break_id
+FROM study_segments g JOIN study_breaks b ON b.user_id = g.user_id
+ AND tstzrange(g.started_at, g.ended_at, '[)') && tstzrange(b.started_at, b.closed_at, '[)');
 
--- B. Session totals equal the sum of their closed segments / breaks
-SELECT ss.id
-FROM study_sessions ss
-LEFT JOIN LATERAL (SELECT COALESCE(SUM(duration_ms), 0) AS ms FROM study_segments WHERE session_id = ss.id AND ended_at IS NOT NULL) seg ON true
-LEFT JOIN LATERAL (SELECT COALESCE(SUM(actual_ms), 0)  AS ms FROM break_periods  WHERE session_id = ss.id AND ended_at IS NOT NULL) brk ON true
-WHERE ss.study_ms_closed <> seg.ms OR ss.break_ms_closed <> brk.ms;
-
--- C. Daily totals equal the sum of closed segments per user (attribution conserves time)
-SELECT u.id
-FROM users u
-LEFT JOIN LATERAL (SELECT COALESCE(SUM(study_ms), 0) AS ms FROM daily_study_totals WHERE user_id = u.id) d ON true
-LEFT JOIN LATERAL (SELECT COALESCE(SUM(duration_ms), 0) AS ms FROM study_segments WHERE user_id = u.id AND ended_at IS NOT NULL) s ON true
-WHERE d.ms <> s.ms;
-
--- D. STUDYING ⇔ exactly one open segment
+-- B. ACTIVE + studying ⇔ exactly one open segment, matching current_segment_started_at
 SELECT ss.id FROM study_sessions ss
-LEFT JOIN study_segments sg ON sg.session_id = ss.id AND sg.ended_at IS NULL
-WHERE (ss.status = 'STUDYING') <> (sg.id IS NOT NULL)
-   OR (ss.status = 'STUDYING' AND sg.started_at <> ss.segment_started_at);
+LEFT JOIN study_segments g ON g.session_id = ss.id AND g.ended_at IS NULL
+WHERE ss.status = 'ACTIVE'
+  AND ((ss.current_segment_started_at IS NULL) <> (g.id IS NULL)
+       OR g.started_at IS DISTINCT FROM ss.current_segment_started_at);
 
--- E. ON_BREAK ⇔ exactly one open break
+-- C. ACTIVE + on break ⇔ exactly one open break, matching break_ends_at
 SELECT ss.id FROM study_sessions ss
-LEFT JOIN break_periods b ON b.session_id = ss.id AND b.ended_at IS NULL
-WHERE (ss.status = 'ON_BREAK') <> (b.id IS NOT NULL);
+LEFT JOIN study_breaks b ON b.session_id = ss.id AND b.closed_at IS NULL
+WHERE ss.status = 'ACTIVE'
+  AND ((ss.break_ends_at IS NULL) <> (b.id IS NULL) OR b.ends_at IS DISTINCT FROM ss.break_ends_at);
 
--- F. R5: every transition INTO STUDYING was user-initiated
+-- D. ENDED sessions have nothing open, and every interval lies inside the session window
+SELECT ss.id FROM study_sessions ss
+WHERE ss.status = 'ENDED' AND (
+      EXISTS (SELECT 1 FROM study_segments g WHERE g.session_id = ss.id AND (g.ended_at IS NULL OR g.ended_at > ss.ended_at OR g.started_at < ss.started_at))
+   OR EXISTS (SELECT 1 FROM study_breaks  b WHERE b.session_id = ss.id AND (b.closed_at IS NULL OR b.closed_at > ss.ended_at OR b.started_at < ss.started_at)));
+
+-- E. R5: every entry into STUDYING was user-initiated
 SELECT id FROM session_events
-WHERE to_status = 'STUDYING'
-  AND from_status IS DISTINCT FROM 'STUDYING'
-  AND actor <> 'USER';
+WHERE to_phase = 'STUDYING' AND from_phase <> 'STUDYING' AND actor <> 'USER';
+
+-- F. Every RESUMED break is followed by a segment starting at the same instant (no lost or extra time)
+SELECT b.id FROM study_breaks b
+WHERE b.close_reason = 'RESUMED'
+  AND NOT EXISTS (SELECT 1 FROM study_segments g WHERE g.session_id = b.session_id AND g.started_at = b.closed_at);
+
+-- G. A room session's user is a member of that room (R16 consistency)
+SELECT ss.id FROM study_sessions ss
+WHERE ss.room_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = ss.room_id AND m.user_id = ss.user_id);
+
+-- H. R2: rooms have no timer columns (schema guard)
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'rooms' AND column_name ~ '(timer|break|segment|started|ends_at|duration)';
 ```
 
 ---
 
-## 9. Migrations workflow
+## 9. Feature → data support check
 
-1. Edit `schema.prisma`, then run `npx prisma migrate dev --create-only --name <change>`.
-2. Review the generated SQL. **Remove any `DROP` of hand-written objects** (Prisma does not
-   model partial indexes or exclusion constraints and may try to drop them). Append new
-   hand-written SQL if needed.
-3. Run `npx prisma migrate dev` to apply it, then commit `schema.prisma` and the migration together.
-4. **Schema-invariants test** (`apps/server/test/integration/schema.test.ts`): after
-   `migrate deploy` on a fresh DB, it asserts that every named object from §5 exists in
-   `pg_indexes` / `pg_constraint`. CI fails if a migration silently removed one.
-5. Production: `prisma migrate deploy` only. Migrations must be backward compatible for one
-   release (expand → migrate → contract).
-
----
-
-## 10. Seed data
-
-`apps/server/prisma/seed.ts` (development only; refuses to run when `NODE_ENV=production`):
-
-- Users `alice@example.com` (`America/New_York`), `bob@example.com` (`Asia/Kolkata`),
-  `chen@example.com` (`Australia/Lord_Howe`, which has a 30-minute DST shift). Shared dev
-  password is printed to the console.
-- Rooms: one public ("Library — Silent Study") and one private with an invite code, both
-  with tasks in several statuses.
-- 60 days of historical sessions and segments generated **through the real accounting
-  service** (not raw inserts), including segments crossing local midnight and the
-  2026-03-08 and 2026-11-01 US DST transitions, so charts and streaks render realistic data.
+| Spec feature | Supported by |
+|---|---|
+| Four states + Offline | Phase derived from `study_sessions` (§13.2 of ARCHITECTURE); Offline from presence |
+| Break 5/10/15/30, countdown visible to room | `study_breaks.duration_minutes` (CHECK), `study_sessions.break_ends_at` |
+| No auto resume; resume only from Break Over | `brk_resume_only_after_end`, `evt_no_system_resume` |
+| Disconnect grace / idle auto-save surviving restarts | `disconnected_at`, `last_seen_at`, `break_ends_at` + partial indexes (6.7) |
+| One active session ever | `study_sessions_one_active_per_user` |
+| Session lives in one room; solo moves into room | `study_sessions.room_id` + per-segment `room_id` (ROOM_MOVE split) |
+| Reusable rooms, My Rooms, code | `rooms`, `room_members.last_visited_at`, `rooms.code` unique + format |
+| Room screen statuses | 6.5 + presence |
+| Today in this room | 6.3 |
+| Personal and room tasks, real-time | `tasks.room_id` NULL/non-NULL, `version`, `completed_by_id` |
+| Attach task to session | `study_sessions.task_id` |
+| Refresh-proof timer | `current_segment_started_at`, `break_ends_at`, Σ closed segments |
+| Daily totals Solo/Rooms/Total, 11pm–1am split | 6.1 |
+| Streak from history | 6.2 |
+| Session summary incl. completed tasks | 6.4 |
+| History, weekly/monthly, heatmap, room history | 6.10, 6.12, 6.11, 6.3 over a date range |
+| Saved-session toast | `end_reason`, `summary_seen_at` |
 
 ---
 
-## 11. Retention, deletion & backups
+## 10. Migrations workflow
+
+1. Edit `schema.prisma` → `npx prisma migrate dev --create-only --name <change>`.
+2. Review the SQL. **Delete any `DROP` of hand-written objects** (Prisma doesn't model
+   partial indexes or EXCLUDE constraints). Append new hand-written SQL.
+3. `npx prisma migrate dev`. Commit the schema and migration together.
+4. `INT-SCHEMA` asserts every named object from §5 exists after `migrate deploy` on a fresh
+   database, and that each rejects its violation.
+5. Production uses `prisma migrate deploy` only. Changes follow expand → migrate → contract.
+
+---
+
+## 11. Seed data
+
+`prisma/seed.ts` is dev only and refuses to run with `NODE_ENV=production`. It creates users in
+`Asia/Kolkata`, `America/New_York` and `Australia/Lord_Howe`, the room "DSA Night Study" (code
+`DSA7K2`) with all three as members, personal and room tasks, and 60 days of sessions
+generated **through the session service with a fake clock**. These include solo-to-room
+moves, breaks, idle and disconnect auto-saves, midnight-spanning segments, and the 2026 US DST
+days, so history, streak and charts look realistic.
+
+---
+
+## 12. Retention and capacity
 
 | Data | Policy |
 |---|---|
-| `session_events` | Retain 180 days [Q18]. A daily purge job deletes by `recorded_at` in batches. |
-| `refresh_tokens` | Purge rows expired or revoked for more than 30 days. |
-| `room_tasks` soft-deleted | Purge after 30 days. |
-| Account deletion | One transaction: end the active session (`ACCOUNT_DELETED`); transfer each owned room to the longest-tenured moderator or member, otherwise archive it; delete the user (cascades personal rows). Task authorship on shared tasks is reassigned to a "Deleted user" tombstone [Q18]. |
-| Backups | Managed-Postgres daily snapshots + point-in-time recovery (deployment phase, Q17). |
+| `session_events` | 180 days, purged daily in batches by `recorded_at` |
+| `refresh_tokens` | Purge 30 days after expiry or revocation |
+| Soft-deleted tasks | Kept while referenced by a session (summary titles); otherwise purged after 30 days |
+| Segments, breaks, sessions | Kept indefinitely: they *are* the history and the streak |
 
----
-
-## 12. Capacity estimates
-
-Assuming 10,000 daily-active users × 3 sessions/day × ~4 segments/session:
-
-| Table | Rows / day | Notes |
-|---|---|---|
-| `study_segments` | ~120 k | ~45 M/year, which is fine with the indexes above. Partition by year if needed. |
-| `break_periods` | ~60 k | |
-| `session_events` | ~400 k | Bounded by 180-day retention (~72 M rows). |
-| `daily_study_totals` | ~10 k | Tiny. Serves all charts. |
-| Lease updates | 1 batched `UPDATE` / 30 s / instance | Independent of user count in query count. |
+Capacity at 10k daily users: ~40k segments/day (~15 M/year). Per-user queries touch about
+2k rows/year, so a computed streak scanning a user's full history is cheap with
+`(user_id, started_at)`. If needed later, a rebuildable daily cache can be added without
+changing the source of truth (ARCHITECTURE T3).
