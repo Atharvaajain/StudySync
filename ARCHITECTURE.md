@@ -1,10 +1,10 @@
 # StudySync — Architecture
 
-> **Status: v1.0 FINAL — reconciled with the final product specification. Awaiting approval.**
-> No application code exists yet. The spec is the source of truth. Where it was silent or
-> ambiguous, the interpretations used are listed in [§4](#4-interpretations-of-the-spec). Gaps
-> that need a product decision are listed in [§5](#5-gaps-needing-a-product-decision); they are
-> **not** in the baseline until approved.
+> **Status: v1.1 — APPROVED by the product owner, with clarifications recorded in
+> [§5 Product decisions](#5-product-decisions).** Phase 0 has **not** started; it begins only
+> after the product owner's explicit go. No application code exists yet. The spec is the
+> source of truth. Where it was silent or ambiguous, the approved interpretations are listed
+> in [§4](#4-interpretations-of-the-spec).
 
 Companion documents:
 [DATABASE_DESIGN.md](./DATABASE_DESIGN.md) ·
@@ -21,7 +21,7 @@ Companion documents:
 2. [Spec coverage matrix](#2-spec-coverage-matrix)
 3. [Product rules → enforcement](#3-product-rules--enforcement)
 4. [Interpretations of the spec](#4-interpretations-of-the-spec)
-5. [Gaps needing a product decision](#5-gaps-needing-a-product-decision)
+5. [Product decisions](#5-product-decisions)
 6. [Edge cases and how they are handled](#6-edge-cases-and-how-they-are-handled)
 7. [System architecture](#7-system-architecture)
 8. [Technology stack](#8-technology-stack)
@@ -67,9 +67,9 @@ shared timer.*
 | **Segment** | One continuous block of `STUDYING`. **The only source of study time.** |
 | **Break** | A 5/10/15/30-minute countdown taken from `STUDYING`. Never counted as study. |
 | **Room** | A permanent space with a name and a 6-character code. It has members and room tasks. **It has no timer.** |
-| **Membership** | The durable link between a user and a room. It powers *My Rooms* and access to the room. |
+| **Membership** | The durable link between a user and a room. It powers *My Rooms* and access to the room. **Permanent in the MVP** (D-2). |
 | **Presence** | Ephemeral "this user is on this room's screen right now", tracked from live sockets. |
-| **Liveness** | Whether the server can see the user for their session: any live connection for a solo session, presence in that room for a room session (§11.3). |
+| **Liveness** | Whether the server can see the user for their session. **Solo session:** any live connection, on any page, tab or device. **Room session:** that room's screen open on at least one tab or device. Full comparison in §11.3. |
 | **Disconnect grace** | 2 minutes after liveness is lost. Return in time and nothing changes; otherwise the session auto-saves. |
 | **Idle timeout** | 30 minutes in `BREAK_OVER` without clicking Resume → the session auto-saves. |
 | **Auto-save** | The server ends the session itself (`DISCONNECTED` or `IDLE_TIMEOUT`). All recorded time is kept. |
@@ -168,20 +168,21 @@ constraint**. Test IDs are defined in [TESTING_STRATEGY.md](./TESTING_STRATEGY.m
 ## 4. Interpretations of the spec
 
 Where the spec is silent or ambiguous, this design uses the reading most consistent with the
-spec's text and intent. Each item is testable and listed so you can veto any of them.
+spec's text and intent. **These interpretations were approved together with the architecture.**
+Each one is covered by tests.
 
 | ID | Topic | Interpretation (baseline) | Why |
 |---|---|---|---|
 | I-01 | "⚪ Break Over / Idle" | **Server:** two cases, `BREAK_OVER` (an active session whose countdown has finished) and `NO_SESSION` (present, not studying). **Room display:** both show as ⚪ Idle. **Your own timer:** "Break over — Resume". | The spec groups them visually, but only `BREAK_OVER` has the 30-min auto-save. |
-| I-02 | What "connection drops" means | **Solo session:** any live socket on any device keeps it alive. **Room session:** the user must be *present in that room* (room screen open on any device). Closing the tab and clicking Leave are therefore treated identically. | Spec: "Leaving = closing the tab or clicking Leave. After 2 min you show ⚫ Offline. Your accrued time stays saved." |
+| I-02 | What "connection drops" means | **Solo session:** any live socket on any device keeps it alive. **Room session:** the user must be *present in that room* (room screen open on any device). Closing the tab and clicking Leave are therefore treated identically. Full comparison: §11.3. | Spec: "Leaving = closing the tab or clicking Leave. After 2 min you show ⚫ Offline. Your accrued time stays saved." |
 | I-03 | Time credited when grace expires | Open segment or break closed **at the disconnect instant**, and `ended_at` = that instant. If the user returns within 2 min, the gap is credited (nothing lost). | Spec: "Back within 2 min → nothing lost". Time after the last verified presence is not "accrued". |
-| I-04 | When idle timeout fires | Exactly `break_ends_at + 30 min`. There is **no** idle rule while `STUDYING` or `ON_BREAK`. `ended_at` = that instant. | The spec defines idle only for Break Over. See D-1 for the gap. |
+| I-04 | When idle timeout fires | Exactly `break_ends_at + 30 min`. There is **no** idle rule while `STUDYING` or `ON_BREAK`. `ended_at` = that instant. | The spec defines idle only for Break Over. Kept unchanged for the MVP (D-1). |
 | I-05 | Early resume | **Not allowed.** During `ON_BREAK` the only actions are waiting or End Study. | Spec validation rule: "can't Resume unless Break Over". |
 | I-06 | Changing rooms mid-session | A solo session (`room_id` NULL) moves into a room on create or join (the open segment is split so the solo part stays solo). A session already in room A **cannot** enter room B: `SESSION_IN_OTHER_ROOM`, "End Study first". | Spec: "Your session lives in one room. To study somewhere else: End Study first." |
 | I-07 | Where Start Study puts the session | Started on a room screen → in that room. Started elsewhere → solo. Starting solo while present in a room is rejected. | Spec: "You cannot study solo while in a room." |
 | I-08 | Presence in several rooms | One room at a time per user. Entering room B moves presence out of A, but only when there is no active session in A. | Keeps the status display and session liveness unambiguous. |
 | I-09 | "Today in this room" | Per member: study time in segments recorded **in this room** during **that member's own local today**, including their running segment. Members with 0 are hidden. Sorted by time, matching the mock. | Matches each member's own daily totals; everyone sees the same panel. |
-| I-10 | Timezone changes | Each segment snapshots the user's timezone when it starts, and days are grouped by that snapshot. Changing timezone affects future study only, so past days and streaks never shift. "Today" uses the current timezone. | Spec: "days are grouped in the user's local time", without retroactive changes. |
+| I-10 | Timezone changes | Each segment snapshots the user's timezone when it starts, and days are grouped by that snapshot. Changing timezone affects future study only, so past days and streaks never shift. "Today" uses the current timezone. **Confirmed as decision D-6.** | Spec: "days are grouped in the user's local time", without retroactive changes. |
 | I-11 | When a streak day counts | As soon as recorded time for the local day (including the running segment) reaches 25:00. The current streak is the run of qualifying days ending **today**, or ending **yesterday** if today has not qualified yet (still alive, shown "at risk"). | Recorded time is server-verified even while the segment is open. |
 | I-12 | "Breaks: 2 (18 min)" in the summary | Count = breaks taken. Minutes = countdown time actually used (each ≤ its chosen 5/10/15/30). Waiting in Break Over is neither study nor break. The spec's "gap between segments" (break + waiting) stays derivable. | Bounded, understandable numbers. |
 | I-13 | "✓ Completed during session" | Tasks (personal or room) that **this user** marked done between session start and end. | Needs `tasks.completed_by_id` (DB §2). |
@@ -197,17 +198,40 @@ spec's text and intent. Each item is testable and listed so you can veto any of 
 
 ---
 
-## 5. Gaps needing a product decision
+## 5. Product decisions
 
-These are **not** in the baseline. Each needs your yes or no. Recommendations are given.
+### 5.1 Decision log (final for the MVP)
 
-| ID | Gap | Risk if left as-is | Recommendation |
+Recorded after the product owner's review of v1.0 (2026-10-31). These decisions are binding.
+Changing any of them requires a new explicit decision.
+
+| ID | Topic | Decision | Effect on the design |
 |---|---|---|---|
-| D-1 | **Empty chair while STUDYING.** The spec's idle rule covers only Break Over. A user who walks away with the tab open keeps accruing study time indefinitely. | Inflated study time and streaks; contradicts "no free time for empty chairs". | Add a "Still studying?" prompt after 2 h of continuous studying. With no answer in 10 min, the session auto-saves at the prompt time. Or accept as-is. |
-| D-2 | **Room management.** There is no rename, no code regeneration, no member removal, no way to remove a room from My Rooms, and no delete. | A leaked code can never be revoked; unwanted members can't be removed. | Room creator can rename and regenerate the code. Any member can "Remove from My Rooms" (ends membership). No room deletion (rooms are reusable). |
-| D-3 | **Room size.** The spec sets no limit. | Unbounded broadcast fan-out; abuse. | Baseline already includes a **technical safety limit of 50 members per room** (constant). Confirm the number. |
-| D-4 | **Account management.** There is no password reset, password change or account deletion. | Users locked out permanently; no data deletion. | Password change + account deletion in Phase 4. Password reset needs an email provider (later). |
-| D-5 | **Breaks with the laptop closed.** By the disconnect rule, closing the laptop during a 30-min break auto-saves the session after 2 min. | Users may be surprised. Their time is saved and they start a fresh session afterwards. | Keep (spec-consistent, no zombies). Explain it in the break UI: "Keep StudySync open during your break." |
+| D-0 | Architecture | **Approved overall**: transport split, derived phases, persisted deadlines, computed totals, per-user serialization, DB constraints, interpretations I-01…I-22. | Phase 0 may start after the explicit go. |
+| D-1 | Empty chair while `STUDYING` | **No "still studying?" prompt in the MVP.** The idle and disconnect rules stay exactly as specified: idle timeout only after 30 min in `BREAK_OVER`, and disconnect grace of 2 min. | Accepted MVP limitation: a connected but absent user keeps accruing time while `STUDYING` (E-32, T5). No activity tracking is built. |
+| D-2 | Room membership and management | **Membership is permanent in the MVP.** There is no leaving membership, no member removal, no code regeneration, no room rename and no room deletion. "Leave" only ends *presence* (I-02). | `room_members` rows are never deleted in the MVP. **Member removal** and **room-code regeneration** are future enhancements (§5.2). |
+| D-3 | Room size | **50 members per room** for the initial version. | `ROOM_MAX_MEMBERS = 50`. A join beyond it returns `ROOM_FULL` (E-25, CT-10). |
+| D-4 | Account management | **Password reset and account deletion are deferred to the pre-launch phase** (Phase 5). | Not built in Phases 0–4. Password reset needs an email provider, chosen in Phase 5 (§5.3). |
+| D-5 | Laptop closed during a break | Rules unchanged (follows D-1): disconnect grace also applies during breaks, so the session auto-saves after 2 min. | Informational hint on the break screen: "Keep StudySync open during your break — closing it saves your session after 2 minutes." |
+| D-6 | Timezone history | **Each study segment keeps the timezone snapshot taken when it started. Historical daily totals group each segment by its own snapshot.** | Binding rule for daily totals, Solo/Rooms split, history, charts and streak days (§14.6). "Today" uses the current timezone. |
+| D-7 | Liveness | Solo-session and room-session liveness are defined separately and documented side by side. | §11.3 comparison table, RT-4a / RT-4b / E2E-9 / E2E-18 tests. No rule change. |
+
+### 5.2 Future enhancements (post-MVP, not scheduled)
+
+| Enhancement | Design impact (already supported by the data model) |
+|---|---|
+| **Member removal** | Delete the `room_members` row. Remove the user's sockets from `room:{id}` immediately. If the removed user has an active session in that room, it must be auto-saved (a new end reason) because room-session liveness can no longer be satisfied. History is unaffected because segments reference `room_id`. Who may remove (e.g. the room creator) is decided when it is scheduled. |
+| **Room-code regeneration** | `UPDATE rooms SET code = <new>` with the same generator and uniqueness retry. The old code stops working immediately. Membership, sessions and history are unaffected, because everything references `room_id`, never the code. |
+
+### 5.3 Deferred to the pre-launch phase (Phase 5)
+
+| Feature | Notes for Phase 5 |
+|---|---|
+| **Password reset** | Needs an email provider (to be chosen). Planned `password_reset_tokens` table (hashed, single-use, short TTL). A successful reset revokes all refresh-token families. Uniform responses (no account enumeration). |
+| **Account deletion** | Must resolve `rooms.created_by` (FK `RESTRICT`) and authorship of room tasks in persistent rooms. Likely approach: end the active session first, then anonymize the user record rather than hard-delete. Designed in Phase 5. |
+
+**Not in the MVP and not scheduled:** the empty-chair prompt (D-1), room rename, removing a room
+from My Rooms, room deletion, password change.
 
 ---
 
@@ -233,7 +257,7 @@ These are **not** in the baseline. Each needs your yes or no. Recommendations ar
 | E-16 | Segment from 23:00 to 01:00 local | Split by local day: 1 h yesterday, 1 h today (validated in SQL, including DST days). |
 | E-17 | Studying across a DST change | True elapsed time (UTC) is credited. A local day can be 23 h, 23.5 h, 24.5 h or 25 h. Validated against PostgreSQL. |
 | E-18 | Local midnight does not exist (e.g. `America/Santiago`) | Postgres resolves the day boundary to the transition instant (validated). |
-| E-19 | User changes timezone mid-day | Past segments keep their snapshot. "Today" switches to the new zone. The streak is computed over local dates (I-10). |
+| E-19 | User changes timezone mid-day | Past segments keep their snapshot, so historical daily totals don't change (D-6). "Today" switches to the new zone. The running segment keeps its snapshot until it closes. The streak is computed over local dates (I-10). |
 | E-20 | Two members toggle the same room task at once | Set semantics: both send the target state; the result is deterministic and both receive the final version. |
 | E-21 | Two members edit the same task's text | `expectedVersion` → one wins, the other gets `VERSION_CONFLICT` with the current task. |
 | E-22 | Attached task gets deleted | Soft delete. The session keeps its `task_id`, and the summary still shows the title. |
@@ -246,7 +270,7 @@ These are **not** in the baseline. Each needs your yes or no. Recommendations ar
 | E-29 | Member's countdown shown to others ("On Break 08:42") | Rendered from `breakEndsAt` (UTC) + the viewer's clock offset. Each viewer's countdown is consistent. |
 | E-30 | "Today in this room" across midnight while open | The panel refetches every 60 s and on every `status_changed`. Each member's "today" rolls over at their own midnight (I-09). |
 | E-31 | Session auto-saved while the user is offline | On next connect, `session_state.lastAutoSaved` carries the summary → toast. `summary_seen_at` prevents repeats. |
-| E-32 | Long STUDYING with nobody at the desk | Not handled by the spec → D-1. |
+| E-32 | Long STUDYING with nobody at the desk | **Accepted MVP limitation (D-1).** There is no prompt: time keeps accruing while the user stays connected. The idle and disconnect rules are unchanged. |
 
 ---
 
@@ -401,7 +425,7 @@ room never starts a timer, and ending a session never changes membership.**
 
 | Concept | Storage | Created by | Ends by | Used for |
 |---|---|---|---|---|
-| **Membership** | `room_members` (durable) | `POST /rooms` (creator) or `POST /rooms/join {code}` | Never in the baseline (D-2) | Access to the room, My Rooms |
+| **Membership** | `room_members` (durable) | `POST /rooms` (creator) or `POST /rooms/join {code}` | **Never in the MVP** (D-2). Member removal is a future enhancement. | Access to the room, My Rooms |
 | **Presence** | In memory (`PresenceStore`) | Socket `join_room` | `leave_room`, socket disconnect, or entering another room | Member statuses, room-session liveness |
 | **Session** | `study_sessions` + segments + breaks (durable) | `start_study` | `end_study`, grace expiry, idle timeout | Study time |
 
@@ -422,19 +446,52 @@ leftAt      : Map<roomId, Map<userId, Instant>>  // display grace (I-19)
 
 A user is **present** in room R if at least one of their sockets has joined `room:{R}`.
 
-### 11.3 Liveness (what "connection drops" means for a session)
+### 11.3 Liveness: solo sessions vs room sessions (D-7)
+
+Liveness answers one question: *can the server currently see this user for their active
+session?* It drives the 2-minute disconnect grace (R9). **The grace rules are identical for
+both kinds of session. Only the definition of "live" differs.**
 
 ```
 isLive(user) =
-  session.room_id IS NULL  →  userSockets(user).size ≥ 1          (solo: any page, any device)
-  session.room_id = R      →  user is present in R                (room: room screen open)
+  session.room_id IS NULL  →  userSockets(user).size ≥ 1    SOLO: any page of the app, any tab, any device
+  session.room_id = R      →  user is present in room R     ROOM: room R's screen open in ≥ 1 tab or device
 ```
 
-`PresenceService` re-evaluates `isLive` on every socket connect or disconnect, `join_room` /
-`leave_room`, session start and session move:
+| Situation | Solo session (`room_id` NULL) | Room session (`room_id` = R) |
+|---|---|---|
+| **What keeps it alive** | At least one connected socket, on **any page** (dashboard, history, settings…), any tab, any device | At least one socket **present in room R** (room screen open, `join_room` done), any tab, any device |
+| Navigating to dashboard / history / settings | Still live | **Not live** unless another tab or device still shows room R → grace starts. A banner shows "Back to DSA Night Study — your session saves in 1:42" (E-09). |
+| Clicking **Leave** | n/a (no room) | Not live unless room R is open elsewhere → grace starts (I-02) |
+| Closing one of several tabs | Still live while any tab remains | Still live while any remaining tab or device shows room R (E-10) |
+| A second device (e.g. phone on the dashboard) | Keeps the session live | Keeps it live **only if** that device has room R open |
+| Page refresh, short Wi-Fi drop | Reconnects in seconds → nothing changes | Reconnects + automatic `join_room` → nothing changes |
+| All tabs closed, laptop asleep, network down | Grace starts at the last disconnect | Grace starts at the moment room presence was lost |
+| Server crash (no disconnect event) | Lease refreshed only while the user has a socket on a live instance | Lease refreshed only while the user is present in R on a live instance |
+| Commands that **open** a segment (`start_study`, `resume_study`) | Any of the user's sockets (the caller is live by definition) | Only a socket present in R (`NOT_IN_SESSION_ROOM` otherwise) |
+| `take_break`, `end_study`, `set_session_task` | Any of the user's sockets | Any of the user's sockets (closing actions never need presence) |
+| What room members see during grace | n/a | The member's last status with a "reconnecting" hint |
+| Grace expires (2 min) | Session auto-saved; open interval closed at the disconnect instant | Same, and the member shows ⚫ Offline (`member_left`) |
+| Back within 2 min | Nothing lost; phase unchanged | Nothing lost; phase unchanged; status restored for the room |
 
-- live → not live: `DISCONNECTED { at: now }` → sets `disconnected_at`. Grace deadline = `disconnected_at + 2 min`.
-- not live → live (before the deadline): `RECONNECTED` → clears `disconnected_at`. **The phase is never changed.**
+**Switching basis.** A solo session becomes a room session at the instant it moves into room R
+("Study with friends", or joining while solo-studying). The move always happens inside
+`join_room`, so the user is present in R at that instant and liveness continues without a gap.
+A room session never becomes solo again; ending it is the only way out (I-06).
+
+**Session grace vs display grace.** These are two separate 2-minute timers. *Session grace*
+(this section) decides whether a session auto-saves. *Display grace* (I-19) decides when a
+member who left a room's screen is shown ⚫ Offline, whether or not they have a session. For a
+room session both start at the same instant (losing presence in R), so the room shows Offline
+at the moment the session auto-saves.
+
+**Evaluation.** `PresenceService` re-evaluates `isLive` on every socket connect or
+disconnect, `join_room` / `leave_room`, session start and session move. Evaluation is
+serialized per user (§12.3):
+
+- live → not live: `DISCONNECTED { at: now }` sets `disconnected_at`. Grace deadline = `disconnected_at + 2 min`.
+- not live → live (before the deadline): `RECONNECTED` clears `disconnected_at`. **The phase never changes.**
+- The crash-path lease (§13.6) uses the same two definitions when it refreshes `last_seen_at` (DATABASE_DESIGN §6.8).
 
 ### 11.4 Room display status (what other members see)
 
@@ -792,10 +849,22 @@ For each member of R: Σ of their segment pieces with `room_id = R` whose local 
 | Concern | Rule |
 |---|---|
 | Capture | At signup from `Intl.DateTimeFormat().resolvedOptions().timeZone`, editable in settings. Validated as IANA by Luxon; the API rejects unknown zones. |
-| Storage | `users.timezone` (current). `study_segments.timezone` (snapshot at segment start, I-10). |
+| Storage | `users.timezone` (current). `study_segments.timezone`: snapshot taken when each segment starts (**D-6**). |
 | Instants | `timestamptz(3)`. DB `timezone = UTC`. Node `TZ=UTC`. API `…Z`. |
 | Local dates | `YYYY-MM-DD` strings in the API; never instants. |
 | Engine | Aggregation in PostgreSQL (`AT TIME ZONE`). "Today", validation and display in Luxon. A test cross-checks the two engines on the DST matrix (TESTING §6). |
+
+**Timezone rules (D-6, binding):**
+
+1. Every segment stores the user's timezone at the moment it **starts**. The snapshot never
+   changes afterwards, even if the user edits their timezone while the segment is running.
+2. Historical daily totals, the Solo/Rooms split, history, weekly/monthly/heatmap charts,
+   "Today in this room" and streak days all group each segment by **its own snapshot**.
+3. "Today" (TODAY card, today-in-room, the streak's today/yesterday check) is resolved in the
+   user's **current** timezone.
+4. Therefore changing timezone never rewrites past days or breaks a past streak; it affects new
+   segments only. The first segment opened after the change (e.g. the next Resume) uses the
+   new timezone.
 
 ### 14.7 History and stats (F-41)
 
@@ -862,7 +931,8 @@ When a room session is active and the user is not on its room screen, a global b
   Break countdown: `breakEndsAt − correctedNow`.
 - When the countdown reaches 0, the UI shows "Break over — Resume" locally, but **never sends
   anything automatically** (R5). Resume is enabled only once `correctedNow ≥ breakEndsAt`.
-- The break picker has exactly four buttons: 5 · 10 · 15 · 30.
+- The break picker has exactly four buttons: 5 · 10 · 15 · 30. During a break the screen shows
+  the D-5 hint: "Keep StudySync open during your break — closing it saves your session after 2 minutes."
 
 ### 16.3 Room screen (F-22)
 
@@ -921,11 +991,11 @@ escapes all text; `dangerouslySetInnerHTML` is banned.
 Alphabet `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (32 chars: no O, 0, I, 1), length 6, generated with
 `crypto.randomInt`. DB unique + format check, retry on collision. Knowing the code is the
 access credential, so join attempts are rate-limited and errors are uniform (E-24). Code
-regeneration is D-2.
+regeneration is a future enhancement (§5.2); in the MVP a room's code never changes.
 
 ### 17.5 Abuse limits
 
-Rate limits (API_DESIGN §12). 5 sockets per user. 50 members per room (D-3). 500 live tasks per
+Rate limits (API_DESIGN §10). 5 sockets per user. 50 members per room (D-3). 500 live tasks per
 room. 1,000 live personal tasks per user. 20 rooms created per user per day. Body 100 KB.
 Socket message 64 KB. Stats range ≤ 366 days.
 
@@ -950,7 +1020,7 @@ of auth headers, cookies, passwords and tokens. `$queryRawUnsafe` banned by lint
 | C4 | Resume racing the idle deadline | Reconcile first; the deadline instant belongs to the system (E-03) | CT-4 |
 | C5 | Sweeper vs command vs scheduler on one session | `pg_try_advisory_xact_lock` + `SKIP LOCKED`; reconcile is idempotent | CT-5 |
 | C6 | Two tabs moving a solo session into two rooms | Per-user lock; the second gets `SESSION_IN_OTHER_ROOM` | CT-6 |
-| C7 | Disconnect/reconnect races; multi-tab presence | Per-user in-process queue; socket counting per room; liveness evaluated after each change | RT-4 |
+| C7 | Disconnect/reconnect races; multi-tab presence | Per-user in-process queue; socket counting per room; liveness evaluated after each change (solo vs room, §11.3) | RT-4a, RT-4b |
 | C8 | Overlapping study intervals | One open segment per session **and** per user; GiST no-overlap per user | CT-7 |
 | C9 | Concurrent task toggles cancel out | Set semantics (I-14) | CT-8 |
 | C10 | Concurrent task edits | `expectedVersion` → `VERSION_CONFLICT` | CT-9 |
@@ -985,7 +1055,7 @@ of auth headers, cookies, passwords and tokens. `$queryRawUnsafe` banned by lint
 | T2 | Timezone engine mismatch (PostgreSQL tzdata vs Node ICU) | Aggregation only in SQL; Luxon only for "today" and display; cross-check test on the DST matrix |
 | T3 | Query-based totals get slow for heavy users | Indexed by `(user_id, started_at)`; ~2k segments/user/year is trivial. A rebuildable cache can be added later without changing the source of truth. |
 | T4 | Socket reliability behind proxies | Long-polling fallback, sticky sessions, lease-based detection |
-| T5 | Empty-chair STUDYING (spec gap) | D-1 |
+| T5 | Empty-chair STUDYING | **Accepted MVP limitation (D-1).** No prompt; idle and disconnect rules unchanged. It can be measured afterwards from segment lengths. |
 | T6 | Ephemeral cloud container | Push often; DB is disposable (`db:reset`) |
 
 ---
@@ -1048,7 +1118,7 @@ everything is committed and pushed, and the DB is rebuilt with `db:reset`.
 | `BREAK_OVER_IDLE_TIMEOUT_MS` | `1_800_000` |
 | `STREAK_MIN_STUDY_MS` | `1_500_000` |
 | `ROOM_CODE_ALPHABET` / `ROOM_CODE_LENGTH` | `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` / `6` |
-| `ROOM_MAX_MEMBERS` | `50` (D-3) |
+| `ROOM_MAX_MEMBERS` | `50` (decided, D-3) |
 | `LEASE_REFRESH_MS` / `LEASE_STALE_MS` / `SWEEP_INTERVAL_MS` | `30_000` / `90_000` / `5_000` |
 
 ---
@@ -1080,8 +1150,8 @@ evaluation). Optional rebuildable daily-total cache if T3 materializes.
 | 003 | Pure machine + derived phase + persisted deadlines + reconcile | Exact, restart-safe and testable. `ON_BREAK → BREAK_OVER` needs no write. |
 | 004 | Segments are the only source of study time; everything else is a query | Spec ("counters drift; queries don't") |
 | 005 | `study_breaks` table in addition to `break_ends_at` | Trailing breaks, chosen duration as auditable data, break vs waiting time |
-| 006 | Timezone snapshot per segment; aggregation in SQL | Stable history (I-10); validated DST behavior; one aggregation engine |
-| 007 | Liveness = room presence for room sessions, any connection for solo | Spec: "Leaving = closing the tab or clicking Leave" |
+| 006 | Timezone snapshot per segment; aggregation in SQL | Stable history (I-10, **decision D-6**); validated DST behavior; one aggregation engine |
+| 007 | Liveness = room presence for room sessions, any connection for solo (§11.3, D-7) | Spec: "Leaving = closing the tab or clicking Leave" |
 | 008 | Grace expiry closes intervals at the disconnect instant | Credits only verified study; "back within 2 min → nothing lost" |
 | 009 | Per-user advisory lock + row lock | Serializes creation (no row yet) and moves across instances |
 | 010 | Access token in memory + rotating refresh cookie | XSS-resistant JWT auth that survives reloads |

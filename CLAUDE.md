@@ -4,10 +4,11 @@ Read this first, every session. It is the standing brief for Claude (and any eng
 
 ## Project status
 
-**Design v1.0 FINAL — awaiting the product owner's explicit approval.** No application code
-exists yet. **Do not scaffold or implement anything until approval is given.** After that,
-follow DEVELOPMENT_ROADMAP.md step by step (Phase 0 Spike → 1 Solo → 2 Rooms → 3 Stats →
-4 Polish → 5 Release) and stop for approval at the end of every phase.
+**Architecture v1.1 APPROVED (with clarifications, ARCHITECTURE §5). Phase 0 has NOT started.**
+No application code exists yet. **Do not scaffold or implement anything until the product
+owner gives the explicit go for Phase 0.** After that, follow DEVELOPMENT_ROADMAP.md step by
+step (Phase 0 Spike → 1 Solo → 2 Rooms → 3 Stats → 4 Polish → 5 Pre-launch & release) and stop
+for approval at the end of every phase.
 
 ## What StudySync is
 
@@ -38,12 +39,19 @@ stop and ask.
    room, never two rooms. A session lives in one room. A solo session moves into a room on
    create or join. Room A → room B requires End Study first.
 7. **Disconnect grace = 2 minutes.** Back in time → nothing lost. Otherwise the session ends
-   and saves at the disconnect instant.
-8. **Idle timeout = 30 minutes in `BREAK_OVER`** → the session ends and saves.
+   and saves at the disconnect instant. **Liveness differs by session type** (ARCHITECTURE
+   §11.3): a **solo** session stays live while the user has any connection (any page, tab or
+   device); a **room** session stays live only while that room's screen is open on at least one
+   tab or device.
+8. **Idle timeout = 30 minutes in `BREAK_OVER`** → the session ends and saves. There is no other
+   idle or "still studying?" rule in the MVP (D-1).
 9. **Rooms are reusable.** Membership ≠ presence ≠ session (three separate concepts).
+   **Membership is permanent in the MVP** (D-2). Max **50 members** per room (D-3).
 10. **Room tasks sync in real time.** Only room members can touch them.
 11. **Server is the source of truth.** Clients never send timestamps or durations.
 12. **All timestamps stored in UTC.** **Daily totals use the user's timezone** (split at local midnights).
+    Each segment keeps the timezone snapshot from when it started. Historical totals group by
+    that snapshot; "today" uses the current timezone (D-6).
 13. **Streak = consecutive local days with ≥ 25 min recorded study, computed from history.**
     Never store a counter.
 14. Room codes: 6 chars from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no O/0/I/1), unique.
@@ -52,14 +60,29 @@ Canonical values live in `packages/shared/src/constants.ts`: never hard-coded el
 never env-configurable.
 
 **Not building:** video, voice, chat, file or screen sharing, AI, notes, music, calendar,
-friends, public communities, leaderboards. Open product gaps (D-1…D-5 in ARCHITECTURE §5) are
-**not** in scope until approved.
+friends, public communities, leaderboards. **Not in the MVP:** the empty-chair prompt (D-1);
+leaving membership, room rename, room deletion and password change; member removal and
+room-code regeneration (future enhancements, D-2). **Pre-launch (Phase 5) only:** password
+reset and account deletion (D-4).
+
+## Final product decisions (ARCHITECTURE §5)
+
+| ID | Decision |
+|---|---|
+| D-0 | Architecture v1.1 approved, including interpretations I-01…I-22 |
+| D-1 | No empty-chair prompt in the MVP; idle and disconnect rules unchanged |
+| D-2 | Membership permanent; member removal and code regeneration are future enhancements |
+| D-3 | 50 members per room |
+| D-4 | Password reset and account deletion deferred to pre-launch (Phase 5) |
+| D-5 | Rules unchanged during breaks; break screen shows a "keep StudySync open" hint |
+| D-6 | Timezone snapshot per segment; historical totals use it |
+| D-7 | Solo vs room liveness documented and tested separately |
 
 ## Document map
 
 | Doc | Use it for |
 |---|---|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Spec coverage (§2), rules → enforcement (§3), interpretations (§4), open gaps (§5), edge cases (§6), membership/presence/session (§11), **timer state machine + transition table (§13)**, timezones (§14), security (§17), risks (§18) |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Spec coverage (§2), rules → enforcement (§3), interpretations (§4), **product decisions (§5)**, edge cases (§6), membership/presence/session and **solo vs room liveness (§11.3)**, **timer state machine + transition table (§13)**, timezones (§14), security (§17), risks (§18) |
 | [DATABASE_DESIGN.md](./DATABASE_DESIGN.md) | Schema, hand-written constraints, validated time-split SQL, audit queries |
 | [API_DESIGN.md](./API_DESIGN.md) | REST endpoints, socket events (spec names), error codes, authorization matrix |
 | [DEVELOPMENT_ROADMAP.md](./DEVELOPMENT_ROADMAP.md) | Step-by-step build plan, acceptance criteria per phase |
@@ -80,7 +103,9 @@ Code and docs change together. If code diverges from a doc, update the doc in th
   create/join, reads and stats. One shared service layer.
 - **Per-user serialization:** an in-process queue + `pg_advisory_xact_lock(user)` + row lock
   for every session mutation, including the sweeper (`pg_try_advisory_xact_lock` + `SKIP LOCKED`).
-- **Liveness:** solo session = any socket; room session = present in that room.
+- **Liveness:** solo session = any socket on any page; room session = present in that room
+  (ARCHITECTURE §11.3). Segment-opening commands for a room session must come from a socket
+  present in its room.
 - **No stored counters.** Totals, streaks and summaries are SQL over segments, with the
   timezone snapshot per segment.
 - **Emit after commit.** Every push carries a `version` or is a full snapshot.

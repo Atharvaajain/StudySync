@@ -1,6 +1,6 @@
 # StudySync — Testing Strategy
 
-> **Status: v1.0 FINAL — reconciled with the final spec. Awaiting approval.**
+> **Status: v1.1 — APPROVED (product decisions in ARCHITECTURE §5). Phase 0 awaits the explicit go.**
 > Defines how every rule (R1–R18), interpretation (I-xx) and edge case (E-xx) in
 > [ARCHITECTURE.md](./ARCHITECTURE.md) is proven. Test IDs used across the docs are defined here.
 
@@ -18,7 +18,7 @@
 8. [Test data](#8-test-data)
 9. [CI pipeline and gates](#9-ci-pipeline-and-gates)
 10. [Definition of Done](#10-definition-of-done)
-11. [Traceability matrix](#11-traceability-matrix)
+11. [Traceability matrix](#11-traceability-matrix) (incl. [decision tests](#111-decision-traceability))
 12. [Testing checklist (per release)](#12-testing-checklist-per-release)
 
 ---
@@ -41,7 +41,7 @@
 ## 2. Pyramid and tools
 
 ```
-              ▲  E2E — Playwright, multi-browser rooms            ~18 scenarios
+              ▲  E2E — Playwright, multi-browser rooms            ~19 scenarios
              ▲▲▲  Realtime — socket.io-client ↔ in-process server  ~45
            ▲▲▲▲▲▲  Integration + concurrency — Supertest + Postgres  ~250
        ▲▲▲▲▲▲▲▲▲▲▲▲  Unit + property — pure timer, utilities          ~350 + generated cases
@@ -137,6 +137,9 @@ and reconciles are checked against:
   `Intl.supportedValuesOf('timeZone')` within ±2 years, the **SQL midnight split**
   (DATABASE_DESIGN §6.1) equals a **Luxon reference split**, and both conserve total time.
   This guards against PostgreSQL tzdata vs ICU mismatches (ARCHITECTURE T2).
+- **P11 (integration property, D-6):** for random histories in random zones, changing
+  `users.timezone` (any number of times) never changes the per-date totals of any segment that
+  had already started before the change. Only segments started afterwards use the new zone.
 - Streak calculator unit tests over qualified-date lists: gaps, today vs yesterday, `atRisk`, empty history.
 
 ### 5.3 Server unit tests
@@ -145,7 +148,7 @@ JWT (pinned algorithm, `iss`/`aud`), password policy (72-byte limit with multi-b
 refresh hashing, room-code generator (alphabet, length, distribution), error mapping, env
 validation (refuses the test clock in production), per-user queue ordering, socket token
 buckets, presence store (multi-socket, one room per user, display grace), `isLive()` for
-solo and room sessions, `EventCollector` (discarded on rollback).
+solo and room sessions (every row of the ARCHITECTURE §11.3 table), `EventCollector` (discarded on rollback).
 
 ### 5.4 Integration tests (REST + services + PostgreSQL)
 
@@ -156,9 +159,9 @@ solo and room sessions, `EventCollector` (discarded on rollback).
 | `INT-USERS` | Profile edits, timezone validation, timezone change affects only new segments |
 | `INT-TASKS` | Personal: owner-only, idempotent add, set-semantics toggle, versioned edit, soft delete. Room: membership checks, delete rights, limits. `completed_by` / `completed_at` rules. |
 | `INT-SESS` | Every command × phase through the real service. Rejection codes carry `details.session`. `commandId` replay. `STALE_SESSION`. Attach task. Solo and room rules (`MUST_START_IN_CURRENT_ROOM`, `SESSION_IN_OTHER_ROOM`, `NOT_IN_SESSION_ROOM`). Room move splits segments. Summary values (studied, breaks per I-12, where, task, completed tasks). |
-| `INT-ACC` | Daily totals Solo / Rooms / Total via the split query on the §6 matrix. Running segment included. Sessions that end and restart merge per day. |
+| `INT-ACC` | Daily totals Solo / Rooms / Total via the split query on the §6 matrix. Running segment included. Sessions that end and restart merge per day. **Timezone snapshot (D-6):** after `users.timezone` changes, every historical daily total is unchanged; a segment running across the change keeps its old snapshot; the next segment uses the new zone. |
 | `INT-STATS` | `today`, `daily` (zero-filled), `streak` (computed, I-11), `periods`, `heatmap`, range caps |
-| `INT-ROOMS` | Create (code format, collision retry with a forced-collision generator), join by code (case-insensitive, idempotent, `INVALID_CODE`, `ROOM_FULL`), My Rooms order, member list with offline members, Today in this room (each member's own today), room history. Rooms persist with zero sessions (R7). |
+| `INT-ROOMS` | Create (code format, collision retry with a forced-collision generator), join by code (case-insensitive, idempotent, `INVALID_CODE`, `ROOM_FULL`), My Rooms order, member list with offline members, Today in this room (each member's own today), room history. Rooms persist with zero sessions (R7). **Membership is permanent (D-2):** End Study, `leave_room` and disconnects never delete it, and no API path removes it. **Limit (D-3):** the 51st join → `ROOM_FULL`. |
 | `INT-RESILIENCE` | Grace expiry via sweeper. Idle expiry via sweeper. Lease-lost detection. **Restart recovery:** a second app instance on the same DB with an empty presence store; overdue deadlines applied stamped at the deadline; break countdown still correct; no phase changes because of the restart. |
 
 ### 5.5 Concurrency tests (real parallelism, run 20× in CI, 100× nightly)
@@ -185,7 +188,8 @@ solo and room sessions, `EventCollector` (discarded on rollback).
 | RT-1 | Handshake: valid, missing, invalid, expired token, > 5 sockets. `session_state` (cause `CONNECT`) arrives immediately, with `lastAutoSaved` when applicable. |
 | RT-2 | `join_room` by a non-member → `NOT_FOUND`, and no room broadcasts are ever received |
 | RT-3 | Presence and statuses: `member_joined`; `status_changed` for start, break (with `breakEndsAt`), break over (`IDLE`, scheduled at `ends_at`), resume, end; all members listed with `OFFLINE`; one room presence per user |
-| RT-4 | **Liveness and grace (R9):** closing one of two tabs → still live. Closing the room tab while the dashboard tab stays → grace (room session). `leave_room` → grace. Reconnect at +119 s → unchanged, gap credited. No reconnect → `ENDED (DISCONNECTED)` at T, `member_left` after 2 min. Reconnect racing disconnect → no spurious grace. |
+| RT-4a | **Solo-session liveness (R9, D-7):** sockets on dashboard, history and settings keep it live. Closing one of two tabs → still live. A second device on any page → still live. Last socket gone → grace. Reconnect at +119 s → unchanged, gap credited. No reconnect → `ENDED (DISCONNECTED)` at T. Reconnect racing disconnect → no spurious grace. |
+| RT-4b | **Room-session liveness (R9, D-7):** a socket present in the session's room keeps it live. A connected socket elsewhere (dashboard tab, phone on dashboard) does **not**. `leave_room` or closing the room tab while a dashboard tab stays → grace. Room open on a second device → still live. `resume_study` from a non-present socket → `NOT_IN_SESSION_ROOM`. Expiry → `ENDED (DISCONNECTED)` at T + `member_left`. Return within 2 min → unchanged. The solo → room move switches the liveness basis without a gap. |
 | RT-5 | `session_state` reaches all of my sockets and none of anyone else's (R1) |
 | RT-6 | Version ordering (ack vs broadcast in either order). Rolled-back transaction emits nothing. |
 | RT-7 | Room move: `join_room` while solo-studying → `MOVED_TO_ROOM`, elapsed unchanged. Study with friends flow. `SESSION_IN_OTHER_ROOM` leaves presence untouched. |
@@ -197,7 +201,7 @@ solo and room sessions, `EventCollector` (discarded on rollback).
 
 ### 5.7 Frontend tests
 
-Timer panel per phase. Break picker renders **exactly** 5/10/15/30. Resume is disabled until
+Timer panel per phase. Break picker renders **exactly** 5/10/15/30. The break screen shows the D-5 hint. Resume is disabled until
 the corrected clock reaches `endsAt`, and nothing is sent automatically at 0. Countdown and
 elapsed use the server offset. Members list (🟢/🟡 countdown/⚪/⚫, reconnecting hint). Today in
 this room live tick. "Back to room" banner countdown. Summary screen. Task list
@@ -217,7 +221,7 @@ token refresh. XSS strings render as text. Accessibility checks on key pages.
 | E2E-6 | Two tabs click Start Study at once → one session, both tabs show it | 1 |
 | E2E-7 | Three members: independent timers. A's break shows to others as "On Break mm:ss". Others unaffected. | 2 |
 | E2E-8 | Room tasks: A adds, B checks off, C sees it within 1 s. Concurrent edit → conflict message. | 2 |
-| E2E-9 | `context.setOffline` 90 s → still studying, nothing lost. Offline > 2 min → auto-saved at disconnect, member Offline, summary on return. | 2 |
+| E2E-9 | **Room-session liveness:** `context.setOffline` 90 s → still studying, nothing lost. Offline > 2 min → auto-saved at disconnect, member Offline, summary on return. Navigating to the dashboard shows the "Back to room" countdown; returning within 2 min → nothing lost. | 2 |
 | E2E-10 | Break over + 30 min (test clock) → auto-saved (`IDLE_TIMEOUT`); the member shows Idle | 2 |
 | E2E-11 | User in Asia/Kolkata studies 23:30–00:30 → history shows 30 + 30 min on two days | 1 |
 | E2E-12 | Room reuse: leave, next day rejoin from My Rooms. Tasks and membership persist; Today in this room starts fresh. | 2 |
@@ -226,6 +230,7 @@ token refresh. XSS strings render as text. Accessibility checks on key pages.
 | E2E-15 | Weekly and monthly charts match `/stats/periods` | 3 |
 | E2E-16 | Break-end browser notification + sound fire at 0 and never resume the timer | 4 |
 | E2E-17 | Saved-session toast after a disconnect auto-save, shown exactly once | 4 |
+| E2E-18 | **Solo-session liveness:** studying solo while browsing dashboard, history and settings in two tabs → never in grace. Close one tab → still live. Close all → auto-saved after 2 min at the disconnect instant. | 2 |
 
 ### 5.9 Security tests
 
@@ -272,7 +277,7 @@ validated against PostgreSQL 16** during design (DATABASE_DESIGN §6.1).
 | Pacific/Kiritimati (+14) vs Pacific/Pago_Pago (−11), same instant | Different local dates |
 | Europe/London 2026-03-29 / 2026-10-25 | 23 h / 25 h days |
 | Asia/Kathmandu (+05:45) | Quarter-hour offset split |
-| Timezone change mid-day (Kolkata → New York) | Old segments keep the old snapshot. "Today" switches. Streak logic over local dates still holds (I-10). |
+| Timezone change mid-day (Kolkata → New York) | Old segments keep the old snapshot, so historical totals are unchanged (D-6). "Today" switches. Streak logic over local dates still holds (I-10). |
 | "Today in this room" with members in Kolkata and New York | Each member's own local today (I-09) |
 
 ---
@@ -335,7 +340,7 @@ manual:  performance suite
 1. Code + tests for the step pass locally (cloud container) and in CI.
 2. New REST endpoint or socket event: Zod schema in `shared`, happy-path + every documented
    error tested, authorization-matrix rows added.
-3. Timer change: transition table updated, P1–P10 still pass.
+3. Timer change: transition table updated, P1–P11 still pass.
 4. Schema change: migration + hand-written SQL + `INT-SCHEMA` assertion.
 5. Docs updated in the same commit. No skipped or `.only` tests. No new warnings.
 
@@ -353,26 +358,38 @@ manual:  performance suite
 | **T-R6** One active session | P9 | CT-1, CT-2, CT-6 | RT-5 | E2E-6 |
 | **T-R7** Rooms reusable | — | INT-ROOMS | — | E2E-12 |
 | **T-R8** Room tasks real-time | Cache bridge | INT-TASKS, CT-8, CT-9 | RT-10 | E2E-8 |
-| **T-R9** Disconnect grace → auto-save | P5, P7 | INT-RESILIENCE, CT-5, CT-12 | RT-4 | E2E-9 |
+| **T-R9** Disconnect grace → auto-save | P5, P7 | INT-RESILIENCE, CT-5, CT-12 | RT-4a, RT-4b | E2E-9, E2E-18 |
 | **T-R10** Idle 30 min → auto-save | P4, P5, P6 | INT-SCHEMA, INT-RESILIENCE, CT-4 | RT-8 | E2E-10 |
 | **T-R11** Streak from history | Streak calculator | INT-STATS | — | E2E-14 |
 | **T-R12** UTC storage | Zod instant schema | INT-SCHEMA (`timestamptz`, DB timezone) | — | E2E-11 |
-| **T-R13** Local-day totals | P10 | INT-ACC, §6 matrix | — | E2E-11 |
+| **T-R13** Local-day totals | P10, P11 | INT-ACC, §6 matrix | — | E2E-11 |
 | **T-R14** Server is the source of truth | No client-instant fields in any schema (type test) | SEC-7 | RT-11 | E2E-0 |
 | **T-R15** One room per session; solo moves in | P9 | INT-SESS, CT-6 | RT-7 | E2E-4, E2E-5 |
-| **T-R16** Membership ≠ presence ≠ session | — | INT-ROOMS, audit G | RT-3, RT-4 | E2E-12 |
+| **T-R16** Membership ≠ presence ≠ session | — | INT-ROOMS, audit G | RT-3, RT-4b | E2E-12 |
 | **T-R17** Room code format and uniqueness | Generator unit test | INT-SCHEMA, INT-ROOMS, CT-11 | — | E2E-5 |
 | **T-R18** Room tasks only for members | — | SEC-1, SEC-2 | RT-2, RT-10 | E2E-8 |
+
+### 11.1 Decision traceability
+
+| Decision | Proven by |
+|---|---|
+| D-1 No empty-chair prompt; idle and disconnect rules unchanged | Machine table (no idle deadline while `STUDYING` / `ON_BREAK`), P6, RT-8 |
+| D-2 Membership permanent | INT-ROOMS (no delete path), SEC-1 (no removal endpoint or event), E2E-12 |
+| D-3 50-member limit | INT-ROOMS (51st join), CT-10 |
+| D-4 Password reset and account deletion in pre-launch | Phase 5 tests (written then); SEC-1 confirms no such endpoints before Phase 5 |
+| D-5 Break hint, rules unchanged | Frontend break-screen test, RT-4a/RT-4b during `ON_BREAK` |
+| D-6 Timezone snapshot per segment | P11, INT-ACC, §6 matrix |
+| D-7 Solo vs room liveness | RT-4a, RT-4b, E2E-9, E2E-18, `isLive()` unit tests |
 
 ---
 
 ## 12. Testing checklist (per release)
 
 **Automated (must be green):**
-- [ ] Lint, typecheck, unit, property (P1–P10)
+- [ ] Lint, typecheck, unit, property (P1–P11)
 - [ ] Integration suites + invariant audits A–H after every test
 - [ ] Concurrency CT-1–CT-12 (×20)
-- [ ] Realtime RT-1–RT-12
+- [ ] Realtime RT-1–RT-12 (incl. RT-4a solo / RT-4b room liveness)
 - [ ] E2E for every phase delivered
 - [ ] SEC-1–SEC-13 · `npm audit` · secret scan
 - [ ] Performance PERF-1–PERF-4 (release candidates)
@@ -381,6 +398,7 @@ manual:  performance suite
 - [ ] Two or three browsers in one room: statuses, countdowns and Today in this room look right
 - [ ] Refresh during studying, during a break, and during Break Over
 - [ ] Wi-Fi off < 2 min and > 2 min. Laptop sleep during a break (D-5 behavior).
+- [ ] Solo session: browse dashboard, history and settings → never in grace. Room session: the same navigation → "Back to room" banner and grace.
 - [ ] Phone + laptop on one account: commands on one reflect on the other
 - [ ] Study across local midnight; change timezone mid-day
 - [ ] "Study with friends" mid-session; joining a second room is blocked

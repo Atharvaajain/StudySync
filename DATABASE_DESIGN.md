@@ -1,6 +1,6 @@
 # StudySync — Database Design
 
-> **Status: v1.0 FINAL — reconciled with the final spec. Awaiting approval.**
+> **Status: v1.1 — APPROVED (product decisions D-0…D-7 in ARCHITECTURE §5). Phase 0 awaits the explicit go.**
 > PostgreSQL 16 + Prisma. Interpretation IDs (I-xx), gap IDs (D-x) and rule IDs (R-x) refer to
 > [ARCHITECTURE.md](./ARCHITECTURE.md). The hand-written SQL (§5) and the time-splitting
 > queries (§6) were **executed and validated against PostgreSQL 16** in the development container.
@@ -21,6 +21,7 @@
 10. [Migrations workflow](#10-migrations-workflow)
 11. [Seed data](#11-seed-data)
 12. [Retention and capacity](#12-retention-and-capacity)
+13. [Deferred and future items: schema impact](#13-deferred-and-future-items-schema-impact)
 
 ---
 
@@ -32,7 +33,8 @@
 | Timer rules enforced by the database | One ACTIVE session per user, studying-XOR-break, legal break durations, no resume before the countdown ends, idle bound, no overlapping intervals, no system-initiated resume. |
 | UTC storage, local-day grouping (R12, R13) | `timestamptz(3)` everywhere, DB/session timezone UTC. Local days computed in SQL from per-segment timezone snapshots (validated on DST edge cases). |
 | Restart-safe auto-save (R9, R10) | All deadlines derive from persisted columns (`break_ends_at`, `disconnected_at`, `last_seen_at`). |
-| Membership ≠ session (R16) | `room_members` and `study_sessions` are independent tables with independent lifecycles. |
+| Membership ≠ session (R16) | `room_members` and `study_sessions` are independent tables with independent lifecycles. Membership rows are never deleted in the MVP (D-2). |
+| Stable history across timezone changes (D-6) | `study_segments.timezone` is a snapshot taken when the segment starts and is never updated. Every historical query groups by it. |
 
 ---
 
@@ -44,8 +46,8 @@ The spec's schema is kept. **Additions** are listed with the requirement that ne
 |---|---|---|---|
 | `users` | id, name, email, password_hash, timezone, created_at | `updated_at` | Timezone and name are editable (F-34) |
 | `refresh_tokens` | — | whole table | JWT sessions that survive page refresh securely (I-22). Rotation + reuse detection. |
-| `rooms` | id, name, code (unique), created_by, created_at | `updated_at`, code format CHECK | F-13 (no O/0/I/1), D-2 ready |
-| `room_members` | room_id, user_id, joined_at, unique together | `last_visited_at` | My Rooms ordering, one-click rejoin (F-19) |
+| `rooms` | id, name, code (unique), created_by, created_at | `updated_at`, code format CHECK | F-13 (no O/0/I/1). The code never changes in the MVP; regeneration later is a plain `UPDATE` (§13). |
+| `room_members` | room_id, user_id, joined_at, unique together | `last_visited_at` | My Rooms ordering, one-click rejoin (F-19). Rows are never deleted in the MVP (D-2). |
 | `tasks` | id, user_id, room_id (NULL = personal), title, description, status, due_date, created_at, completed_at | `completed_by_id`, `version`, `updated_at`, `deleted_at` | "Completed during session" for room tasks (I-13); edit conflicts (E-21); keep attached-task title in summaries (E-22) |
 | `study_sessions` | id, user_id, room_id, task_id, started_at, ended_at, status (ACTIVE/ENDED), break_ends_at | `end_reason`, `current_segment_started_at`, `last_seen_at`, `disconnected_at`, `summary_seen_at`, `version`, `created_at`, `updated_at` | Auto-save reason and toast (F-40); DB-enforced studying-XOR-break; disconnect grace and crash detection that survive restarts (R9); push ordering |
 | `study_segments` | id, session_id, started_at, ended_at (NULL = studying) | `user_id`, `room_id`, `timezone`, `end_reason`, `created_at` | Per-user no-overlap constraint; Solo/Rooms split when a solo session moves into a room (F-12, F-38); stable local-day grouping (I-10); audit |
@@ -78,8 +80,8 @@ erDiagram
 
 **How the pieces relate:**
 
-- **User ↔ Room is many-to-many through `room_members`.** Membership is durable: it is what
-  *My Rooms* lists and what grants access. It is **not** presence (in memory) and **not** a
+- **User ↔ Room is many-to-many through `room_members`.** Membership is durable and
+  **permanent in the MVP** (D-2): it is what *My Rooms* lists and what grants access. It is **not** presence (in memory) and **not** a
   session.
 - **User → Study session is one-to-many**, with **at most one `ACTIVE`** (partial unique
   index). Past sessions stay `ENDED` forever as history.
@@ -88,7 +90,8 @@ erDiagram
   sessions: a room keeps existing with zero sessions (reusable, R7).
 - **Study session → Segments (1-to-many)** are the study time. Each segment has its own
   `room_id` and `timezone` snapshot, so a session that moved from solo into a room splits
-  correctly into Solo and Rooms time, and days are grouped stably.
+  correctly into Solo and Rooms time, and days are grouped by each segment's own timezone
+  snapshot (D-6).
 - **Study session → Breaks (1-to-many).** Each break is the chosen 5/10/15/30 countdown plus
   when it actually closed. A session's history alternates segment, break, segment, …, with no
   overlaps.
@@ -236,6 +239,7 @@ model Room {
   @@map("rooms")
 }
 
+// D-2: membership is permanent in the MVP: rows are never deleted.
 model RoomMember {
   roomId        String    @map("room_id") @db.Uuid
   userId        String    @map("user_id") @db.Uuid
@@ -314,7 +318,7 @@ model StudySegment {
   sessionId String            @map("session_id") @db.Uuid
   userId    String            @map("user_id") @db.Uuid
   roomId    String?           @map("room_id") @db.Uuid // snapshot: NULL = solo study
-  timezone  String            @db.VarChar(64) // snapshot of users.timezone at segment start (I-10)
+  timezone  String            @db.VarChar(64) // snapshot of users.timezone at segment start (I-10, D-6); never updated
   startedAt DateTime          @map("started_at") @db.Timestamptz(3)
   endedAt   DateTime?         @map("ended_at") @db.Timestamptz(3) // NULL = currently studying
   endReason SegmentEndReason? @map("end_reason")
@@ -475,6 +479,8 @@ after every integration test and nightly.
 
 Time math runs in SQL so there is one aggregation engine. All instants are passed as
 parameters from the app `Clock` (`$now`), never `now()`, so tests are deterministic.
+**Every historical grouping uses the segment's own timezone snapshot (`s.timezone`, D-6).**
+Only "today" uses the user's current `users.timezone`.
 
 ### 6.1 Daily totals with midnight splitting (F-35, F-38): Solo / Rooms / Total
 
@@ -651,6 +657,12 @@ WHERE s.status = 'ACTIVE' AND s.disconnected_at IS NULL
              SELECT p.u, p.r FROM unnest($3::uuid[], $4::uuid[]) AS p(u, r))));
 ```
 
+The two branches are exactly the **solo** and **room** liveness definitions (ARCHITECTURE
+§11.3). A solo session is refreshed if its user has any socket on this instance. A room
+session is refreshed only if its user is present in that session's room. A user who is
+connected but not present in their session's room is deliberately **not** refreshed
+(validated on PostgreSQL 16).
+
 ### 6.9 Break-end pushes to reschedule at boot
 
 ```sql
@@ -768,6 +780,10 @@ WHERE table_name = 'rooms' AND column_name ~ '(timer|break|segment|started|ends_
 | One active session ever | `study_sessions_one_active_per_user` |
 | Session lives in one room; solo moves into room | `study_sessions.room_id` + per-segment `room_id` (ROOM_MOVE split) |
 | Reusable rooms, My Rooms, code | `rooms`, `room_members.last_visited_at`, `rooms.code` unique + format |
+| Permanent membership (D-2) | No delete path for `room_members` in the MVP |
+| 50-member limit (D-3) | Count of `room_members` under a room row lock at join time |
+| Solo vs room liveness (D-7) | `last_seen_at`, `disconnected_at` + lease refresh (6.8) |
+| Timezone history (D-6) | `study_segments.timezone` snapshot used by 6.1–6.3, 6.11, 6.12 |
 | Room screen statuses | 6.5 + presence |
 | Today in this room | 6.3 |
 | Personal and room tasks, real-time | `tasks.room_id` NULL/non-NULL, `version`, `completed_by_id` |
@@ -817,3 +833,17 @@ Capacity at 10k daily users: ~40k segments/day (~15 M/year). Per-user queries to
 2k rows/year, so a computed streak scanning a user's full history is cheap with
 `(user_id, started_at)`. If needed later, a rebuildable daily cache can be added without
 changing the source of truth (ARCHITECTURE T3).
+
+---
+
+## 13. Deferred and future items: schema impact
+
+None of these are built in the MVP. The current model already supports them without
+restructuring.
+
+| Item | When | Schema impact |
+|---|---|---|
+| Password reset (D-4) | Phase 5 (pre-launch) | New table `password_reset_tokens(id, user_id, token_hash, expires_at, used_at, created_at)`: hashed, single-use, short TTL. A successful reset revokes all `refresh_tokens` families. |
+| Account deletion (D-4) | Phase 5 (pre-launch) | `rooms.created_by` and `room_members` / `study_segments.room_id` use `RESTRICT`, and rooms are permanent. The likely approach is to end the active session, then **anonymize** the `users` row (name, email, password) instead of a hard delete, so shared rooms and room-task authorship stay intact. Final design in Phase 5. |
+| Member removal (D-2) | Future enhancement | `DELETE FROM room_members`. If the removed user has an ACTIVE session with `room_id` = that room, it must be ended in the same transaction (new `SessionEndReason` value). Segments keep `room_id`, so history is unaffected. |
+| Room-code regeneration (D-2) | Future enhancement | `UPDATE rooms SET code = …` with the same generator, format CHECK and unique retry. No other table stores the code. |

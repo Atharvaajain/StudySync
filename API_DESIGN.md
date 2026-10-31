@@ -1,6 +1,6 @@
 # StudySync — API Design (REST + Socket.IO)
 
-> **Status: v1.0 FINAL — reconciled with the final spec. Awaiting approval.**
+> **Status: v1.1 — APPROVED (product decisions in ARCHITECTURE §5). Phase 0 awaits the explicit go.**
 > Request and response shapes become Zod schemas in `packages/shared/src/schemas`, with event
 > maps in `packages/shared/src/realtime/events.ts`. Server and client share one contract.
 > The spec's §8 socket events are used **with their exact names**. Additions are marked **(+)**.
@@ -210,6 +210,13 @@ Every session-related rejection includes `details.session` (the current `Session
 All **mutations of sessions, presence and tasks are socket events** (§7). REST mutations are
 limited to auth, profile, room creation, join by code and acknowledging a summary.
 
+**Not in the MVP:**
+- **Pre-launch (Phase 5, D-4):** password reset (request + confirm; needs an email provider)
+  and account deletion. Their endpoints are specified in Phase 5.
+- **Future enhancements (D-2):** member removal and room-code regeneration.
+- **No endpoint or event** exists to leave membership, rename a room or delete a room.
+  Membership is permanent in the MVP.
+
 ---
 
 ## 5. REST details
@@ -228,7 +235,7 @@ limited to auth, profile, room creation, join by code and acknowledging a summar
 | Endpoint | Body | Success | Notes |
 |---|---|---|---|
 | `GET /users/me` | — | `200 UserDto` | |
-| `PATCH /users/me` | `{ name?, timezone? }` | `200 UserDto` | A timezone change applies to segments started afterwards (I-10). The running segment keeps its snapshot. |
+| `PATCH /users/me` | `{ name?, timezone? }` | `200 UserDto` | A timezone change applies to segments started afterwards (I-10, D-6). The running segment keeps its snapshot. Historical totals are unchanged. |
 
 ### Rooms
 
@@ -258,7 +265,11 @@ limited to auth, profile, room creation, join by code and acknowledging a summar
 | `GET /sessions/:sessionId/summary` | `200 SessionSummaryDto` | Owner only. For a still-active session it returns a live partial summary with `endedAt: null` and `endReason: null`. |
 | `POST /sessions/:sessionId/summary-seen` | `204` | Sets `summary_seen_at`. Idempotent. |
 
-### Stats (caller only; local dates in the caller's current timezone)
+### Stats (caller only)
+
+Timezone rule (D-6): historical per-day values group **each segment by its own timezone
+snapshot** (the zone in effect when it started). "Today" and the `from`/`to` range bounds are
+interpreted in the caller's **current** timezone. Changing timezone never rewrites past days.
 
 | Endpoint | Query | Success |
 |---|---|---|
@@ -285,6 +296,19 @@ const socket = io(origin, { path: '/socket.io', auth: { token: accessToken }, tr
 4. If the client is on a room screen, it emits `join_room`. The ack carries every snapshot it
    needs.
 
+### Liveness: solo vs room sessions (D-7)
+
+The 2-minute disconnect grace starts when the user stops being **live** for their active
+session. The definition depends on the session type (full table: ARCHITECTURE §11.3).
+
+| | Solo session | Room session |
+|---|---|---|
+| Live while | ≥ 1 connected socket on **any page**, tab or device | ≥ 1 socket that has done `join_room` for **the session's room** (room screen open), any tab or device |
+| Leaving the room screen, or `leave_room` | n/a | Grace starts (unless the room is open elsewhere) |
+| `start_study` / `resume_study` accepted from | Any of the user's sockets | Only a socket present in the session's room (`MUST_START_IN_CURRENT_ROOM`, `NOT_IN_SESSION_ROOM`) |
+| `take_break` / `end_study` / `set_session_task` | Any socket | Any socket |
+| On grace expiry | Auto-save | Auto-save + `member_left` (⚫ Offline) |
+
 Every client→server event takes an ack callback:
 `(res: { ok: true, data } | { ok: false, error: { code, message, details? } }) => void`.
 
@@ -295,7 +319,7 @@ Every client→server event takes an ack callback:
 | Event | Spec | Payload | Ack `data` | Rules |
 |---|---|---|---|---|
 | `join_room` | ✓ | `{ roomId }` | `{ room: RoomDto, members: MemberStatusDto[], tasks: TaskDto[], today: TodayInRoomDto, session: SessionDto \| null, serverNow }` | Membership required (`NOT_FOUND`). Leaves presence in any other room (I-08). **If the user has an active solo session, it moves into this room** (segment split, F-15, `session_state` cause `MOVED_TO_ROOM`). If the session lives in another room → `SESSION_IN_OTHER_ROOM` (no change). Updates `last_visited_at`. Broadcasts `member_joined`. |
-| `leave_room` | ✓ | `{ roomId }` | `{}` | Presence ends. If the user's session lives in this room → grace starts (I-02). Others see the last status with `reconnecting`, then `OFFLINE` after 2 min. |
+| `leave_room` | ✓ | `{ roomId }` | `{}` | Presence ends (all of the user's sockets). If the user's session lives in this room, grace starts (I-02, room-session liveness). Others see the last status with `reconnecting`, then `OFFLINE` after 2 min. **Membership is unchanged (permanent, D-2).** |
 | `start_study` | ✓ | `{ commandId, roomId: UUID \| null, taskId?: UUID \| null }` | `{ session: SessionDto }` | `roomId` must equal the user's current room presence (or `null` if none): `MUST_START_IN_CURRENT_ROOM`. `SESSION_ALREADY_ACTIVE`. `TASK_NOT_ATTACHABLE`. |
 | `take_break` | ✓ | `{ commandId, sessionId, durationMinutes: 5 \| 10 \| 15 \| 30 }` | `{ session }` | `NOT_STUDYING`, `VALIDATION_ERROR` |
 | `resume_study` | ✓ | `{ commandId, sessionId }` | `{ session }` | `BREAK_NOT_OVER` (until the countdown hits 0), `NOT_ON_BREAK`, `NOT_IN_SESSION_ROOM` |
@@ -460,4 +484,7 @@ sequenceDiagram
 | See another member's personal totals, tasks or history | ✗ | ✗ | ✗ (only "Today in this room" / room history) | ✗ | — |
 | Control another user's timer | ✗ | ✗ | ✗ | ✗ | ✗ |
 
-Room management actions (rename, regenerate code, remove member) are pending **D-2**.
+Membership is permanent in the MVP (D-2): no endpoint or event leaves membership, removes a
+member, regenerates a code, renames or deletes a room. Member removal and code regeneration are
+future enhancements (ARCHITECTURE §5.2). Password reset and account deletion arrive in the
+pre-launch phase (D-4).
