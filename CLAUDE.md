@@ -10,6 +10,30 @@ owner gives the explicit go for Phase 0.** After that, follow DEVELOPMENT_ROADMA
 step (Phase 0 Spike → 1 Solo → 2 Rooms → 3 Stats → 4 Polish → 5 Pre-launch & release) and stop
 for approval at the end of every phase.
 
+## Engineering governance (standing rules from the product owner — apply for the whole project)
+
+The six documents (CLAUDE.md, ARCHITECTURE.md, DATABASE_DESIGN.md, API_DESIGN.md,
+DEVELOPMENT_ROADMAP.md, TESTING_STRATEGY.md) are the **permanent source of truth** for StudySync.
+
+1. **Never delete or overwrite** any of the six documents without the product owner's explicit
+   approval.
+2. **Read this file and the relevant architecture documents before implementing any major
+   feature.**
+3. **Never silently change** the approved architecture, database schema, API contracts or
+   product requirements.
+4. If a technical change is necessary, **first explain the reason, the impact and the
+   alternatives**, and wait for a decision before making it.
+5. When an approved architectural decision changes, **update the relevant documentation**
+   (and record the decision in ARCHITECTURE §5).
+6. **Keep documentation synchronized with the implementation.** Code and docs change in the
+   same commit.
+7. **Every development phase is tested against TESTING_STRATEGY.md** before it is reported as
+   done.
+8. **Do not introduce features outside the approved scope** (DEVELOPMENT_ROADMAP §11) without
+   the product owner's permission.
+9. **Preserve the independent timer principle** throughout: never a shared timer.
+10. **Never sacrifice data integrity or security** for implementation convenience.
+
 ## What StudySync is
 
 Students study solo or together in rooms. **Each user runs their own server-verified timer.**
