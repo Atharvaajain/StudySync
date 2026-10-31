@@ -6,7 +6,7 @@
 | Date | 2026-10-31 |
 | Environment | Claude Code cloud container · Node 22.23.4 · npm 10.9.9 · Chromium 153 (Playwright 1.63.0) |
 | Stack | React 19.3 · Vite 8.3 · Tailwind 4.3 · Express 5.3 · Socket.IO 4.8 · Zod 4.3 · TypeScript 5.9 (strict) · Vitest 5.0 |
-| Verdict | **All 9 required acceptance criteria PASS.** 178 automated tests + 8 two-browser E2E tests pass, three consecutive E2E runs without a flake. |
+| Verdict | **All 9 required acceptance criteria PASS.** 178 automated tests + 8 two-browser E2E tests pass (three consecutive E2E runs without a flake). **CI green on GitHub.** |
 
 ---
 
@@ -66,7 +66,7 @@ Product rules verified along the way:
 | The other browser sees the status (and break countdown) **within 1 s** | ✅ PASS (E2E asserts a 1-second limit on 5 status changes) |
 | A refresh while studying shows the same elapsed time (±1 s) | ✅ PASS |
 | Resume is impossible before the countdown ends; nothing resumes automatically | ✅ PASS |
-| CI is green | ⏳ See §8 |
+| CI is green | ✅ PASS — [CI run #1](https://github.com/Atharvaajain/StudySync/actions/runs/41222580382) |
 
 ## 4. TESTING_STRATEGY coverage for Phase 0
 
@@ -114,7 +114,15 @@ Phase 0 follows **your Phase 0 instructions**, which differ from DEVELOPMENT_ROA
 
 ## 8. CI
 
-The workflow `.github/workflows/ci.yml` runs typecheck, lint, format check, Vitest, and the E2E suite on GitHub Actions. Its status on GitHub after the push is reported in the Phase 0 completion message. It could not be verified before pushing.
+The workflow `.github/workflows/ci.yml` ran on GitHub Actions for commit `88bb85a`:
+[run #1](https://github.com/Atharvaajain/StudySync/actions/runs/41222580382) — **success**.
+
+| Job | Steps | Result |
+|---|---|---|
+| Typecheck · lint · format · unit + realtime tests | `npm ci`, typecheck, lint, format check, `npm test` (178 tests) | ✅ success |
+| Two-browser E2E (Playwright) | `npm ci`, install Chromium, `npm run test:e2e` (8 scenarios) | ✅ success |
+
+The same steps were also reproduced locally from a clean `npm ci`, with identical results.
 
 ## 9. Proposed documentation updates (awaiting your approval)
 
