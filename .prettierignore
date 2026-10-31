@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+package-lock.json
+test-results
+playwright-report
+e2e/.artifacts
+# The six approved design documents are formatted by hand and must not be rewritten by tooling.
+CLAUDE.md
+ARCHITECTURE.md
+DATABASE_DESIGN.md
+API_DESIGN.md
+DEVELOPMENT_ROADMAP.md
+TESTING_STRATEGY.md
+docs/

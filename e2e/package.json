@@ -1,0 +1,13 @@
+{
+  "name": "@studysync/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "StudySync end-to-end tests (Playwright). Pinned to the Playwright version whose browser is pre-installed in the cloud container.",
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

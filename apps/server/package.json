@@ -1,0 +1,28 @@
+{
+  "name": "@studysync/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "StudySync server — Express + Socket.IO. Phase 0: in-memory real-time prototype.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/index.js",
+    "start:e2e": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@studysync/shared": "*",
+    "express": "5.3.0",
+    "helmet": "8.3.0",
+    "pino": "10.4.0",
+    "socket.io": "4.8.4",
+    "zod": "4.3.3"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "esbuild": "0.28.2",
+    "socket.io-client": "4.8.4",
+    "tsx": "4.23.15"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Shared source runs in the browser AND on the server: no Node globals allowed here.
+    "types": []
+  },
+  "include": ["src"]
+}
