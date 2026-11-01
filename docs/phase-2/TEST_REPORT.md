@@ -5,7 +5,7 @@
 | Branch      | `feature/phase-2-rooms` (from Phase 1, `a25c4eb`)                                                                                                       |
 | Date        | 2026-11-01                                                                                                                                              |
 | Environment | Claude Code cloud container · Node 22 · PostgreSQL 16 · Chromium (Playwright 1.63.0)                                                                    |
-| Verdict     | **All 14 requested features delivered. 290 automated tests + 21 E2E tests pass** (Phase 2 E2E three consecutive runs without a flake). Phases 0–1 kept. |
+| Verdict     | **All 14 requested features delivered. 290 automated tests + 21 E2E tests pass** (Phase 2 E2E three consecutive runs without a flake). Phases 0–1 kept. **CI green on GitHub** (run 41278982411). |
 
 ---
 
