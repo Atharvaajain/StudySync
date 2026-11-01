@@ -147,7 +147,7 @@ describe('environment guard (§17.6)', () => {
     const prod = {
       ...base,
       NODE_ENV: 'production',
-      JWT_ACCESS_SECRET: 'k9Qz3vR7tY1wX5bN8mL2pA6sD4fG0hJ',
+      JWT_ACCESS_SECRET: 'k9Qz3vR7tY1wX5bN8mL2pA6sD4fG0hJu3Ee',
     };
     expect(loadEnv(prod)).toMatchObject({
       NODE_ENV: 'production',
