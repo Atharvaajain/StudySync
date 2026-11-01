@@ -17,6 +17,7 @@ import {
   type SessionStatePayload,
   type SessionSummaryDto,
 } from '@studysync/shared';
+import type { HttpRateLimits } from '../../src/http/middleware';
 import { ManualClock } from '../../src/lib/clock';
 import { createLogger } from '../../src/lib/logger';
 import { TokenService } from '../../src/modules/auth/tokens';
@@ -196,7 +197,12 @@ export interface Harness {
 
 /** Starts the server on a clean database. */
 export async function startHarness(
-  options: { rateLimits?: RateLimitConfig; start?: number; accessTokenTtlSec?: number } = {},
+  options: {
+    rateLimits?: RateLimitConfig;
+    httpRateLimits?: HttpRateLimits;
+    start?: number;
+    accessTokenTtlSec?: number;
+  } = {},
 ): Promise<Harness> {
   const db = testDb();
   await resetDb(db);
@@ -209,6 +215,7 @@ export async function startHarness(
     db,
     logger: createLogger('silent'),
     rateLimits: options.rateLimits ?? NO_LIMITS,
+    ...(options.httpRateLimits ? { httpRateLimits: options.httpRateLimits } : {}),
   });
   const tokens = new TokenService(env, clock);
   const address = await server.listen(0, '127.0.0.1');
