@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { MyRoomDto, RoomDto } from '@studysync/shared';
 import { api, errorMessage } from '../lib/api';
-import { Card, ErrorNote, inputClass, primaryButton } from './ui';
+import { Card, ErrorNote, Loading, inputClass, primaryButton } from './ui';
 
 /** My Rooms (F-19), Create Room (F-11) and Join Room by code (F-14) on the dashboard. */
 export function RoomsPanel() {
@@ -45,7 +45,9 @@ export function RoomsPanel() {
   return (
     <Card title="Rooms" testId="rooms">
       <ErrorNote message={error} onDismiss={() => setError(null)} />
-      {rooms && rooms.length > 0 ? (
+      {rooms === null && !error ? (
+        <Loading label="Loading your rooms…" />
+      ) : rooms && rooms.length > 0 ? (
         <ul className="divide-y divide-slate-100" data-testid="my-rooms">
           {rooms.map((room) => (
             <li

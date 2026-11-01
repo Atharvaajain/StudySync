@@ -9,6 +9,7 @@ import {
   type BreakMinutes,
   type SessionDto,
 } from '@studysync/shared';
+import { requestBreakNotifications } from '../lib/breakNotification';
 import { BreakPicker } from './BreakPicker';
 
 interface Props {
@@ -57,10 +58,10 @@ export function TimerPanel({
         Your timer
       </h2>
 
-      <div className="mt-3 flex items-baseline justify-between gap-4">
+      <div className="mt-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <p
           data-testid="elapsed"
-          className={`font-mono text-5xl font-bold tabular-nums ${phase === 'STUDYING' ? 'text-slate-900' : 'text-slate-400'}`}
+          className={`font-mono text-4xl font-bold tabular-nums sm:text-5xl ${phase === 'STUDYING' ? 'text-slate-900' : 'text-slate-400'}`}
         >
           {formatDuration(elapsed)}
         </p>
@@ -174,6 +175,7 @@ export function TimerPanel({
           onCancel={() => setPicking(false)}
           onPick={(minutes) => {
             setPicking(false);
+            requestBreakNotifications(); // user gesture: the only moment a prompt is allowed
             onBreak(minutes);
           }}
         />

@@ -1,5 +1,8 @@
 import { Link, NavLink, Outlet, useLocation } from 'react-router';
 import { formatCountdown, formatDuration } from '@studysync/shared';
+import { useEffect, useState } from 'react';
+import { maybeNotifyBreakOver } from '../lib/breakNotification';
+import { serverClock } from '../lib/serverClock';
 import { useNow } from '../lib/useNow';
 import { useAuth } from '../auth/AuthContext';
 import { useRealtime } from '../realtime/RealtimeProvider';
@@ -15,14 +18,32 @@ export function AppShell() {
   const { user, logout } = useAuth();
   const { connection, session, lastAutoSaved, dismissAutoSaved } = useRealtime();
   const now = useNow(1_000);
+
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => {
+      window.removeEventListener('online', up);
+      window.removeEventListener('offline', down);
+    };
+  }, []);
+
+  // Break-end notification: checked every second (scheduled from break.endsAt) and on every
+  // session push (confirmed by the server's BREAK_OVER). Display only; never resumes (R5).
+  useEffect(() => {
+    maybeNotifyBreakOver(session, serverClock.now());
+  }, [session, now]);
   const location = useLocation();
   const roomPath = session?.roomId ? `/rooms/${session.roomId}` : null;
   const showRoomBanner = roomPath !== null && location.pathname !== roomPath;
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-4">
+    <div className="mx-auto max-w-2xl px-3 py-4 sm:px-4">
       <header className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
-        <nav className="flex items-center gap-4 text-sm" aria-label="Main">
+        <nav className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-label="Main">
           <span className="text-lg font-bold text-slate-900">StudySync</span>
           <NavLink to="/" end className={navClass}>
             Dashboard
@@ -59,6 +80,16 @@ export function AppShell() {
           </button>
         </div>
       </header>
+      {(!online || connection === 'failed') && (
+        <p
+          role="status"
+          data-testid="connection-banner"
+          className="mb-4 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        >
+          {online ? 'Can’t reach StudySync right now. Retrying…' : 'You are offline.'} Your timer
+          keeps running on the server; a session saves only after 2 minutes away.
+        </p>
+      )}
       {lastAutoSaved && (
         <p
           role="status"

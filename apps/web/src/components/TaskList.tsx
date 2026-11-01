@@ -62,11 +62,11 @@ export function TaskList({
     <Card title={heading} testId="tasks">
       <ErrorNote message={error} onDismiss={onDismissError} />
       <form onSubmit={(e) => void submit(e)} className="mt-2 space-y-2" aria-label="Add a task">
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <input
             aria-label="Task title"
             data-testid="task-title-input"
-            className={inputClass}
+            className={`${inputClass} flex-1 basis-48`}
             placeholder="Add a task…"
             maxLength={200}
             value={title}
@@ -76,7 +76,7 @@ export function TaskList({
             aria-label="Due date"
             data-testid="task-due-input"
             type="date"
-            className={`${inputClass} w-40`}
+            className={`${inputClass} w-auto basis-36`}
             value={dueDate}
             onChange={(e) => setDueDate(e.target.value)}
           />
@@ -206,11 +206,11 @@ function TaskEditor({
         value={description}
         onChange={(e) => setDescription(e.target.value)}
       />
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <input
           aria-label="Edit due date"
           type="date"
-          className={`${inputClass} w-40`}
+          className={`${inputClass} w-auto basis-36`}
           value={dueDate}
           onChange={(e) => setDueDate(e.target.value)}
         />

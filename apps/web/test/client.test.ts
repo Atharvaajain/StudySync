@@ -1,6 +1,7 @@
 /** Frontend unit tests (TESTING_STRATEGY §5.7): the client's version guard and task order. */
 import { describe, expect, it } from 'vitest';
 import type { SessionDto, TaskDto } from '@studysync/shared';
+import { shouldNotifyBreakOver } from '../src/lib/breakNotification';
 import { acceptSession } from '../src/realtime/sessionGuard';
 import { sortTasks } from '../src/realtime/useTasks';
 
@@ -51,5 +52,29 @@ describe('sortTasks', () => {
       task('soon-a', 'TODO', '2026-11-02', '2026-10-02T00:00:00Z'),
     ]);
     expect(sorted.map((t) => t.id)).toEqual(['soon-a', 'soon-b', 'late', 'none', 'done']);
+  });
+});
+
+describe('break-end notification (roadmap 4.3)', () => {
+  const base = {
+    breakKey: 's1:2026-11-01T10:10:00.000Z',
+    endsAtMs: Date.parse('2026-11-01T10:10:00.000Z'),
+    nowMs: Date.parse('2026-11-01T10:10:00.000Z'),
+    permission: 'granted' as const,
+    hidden: true,
+    alreadyNotified: false,
+  };
+
+  it('notifies once, at or after the end of the break, only when the tab is hidden', () => {
+    expect(shouldNotifyBreakOver(base)).toBe(true);
+    expect(shouldNotifyBreakOver({ ...base, nowMs: base.endsAtMs - 1 })).toBe(false);
+    expect(shouldNotifyBreakOver({ ...base, alreadyNotified: true })).toBe(false);
+    expect(shouldNotifyBreakOver({ ...base, hidden: false })).toBe(false);
+  });
+
+  it('needs permission', () => {
+    for (const permission of ['default', 'denied', 'unsupported'] as const) {
+      expect(shouldNotifyBreakOver({ ...base, permission })).toBe(false);
+    }
   });
 });

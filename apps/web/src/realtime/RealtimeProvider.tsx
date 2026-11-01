@@ -86,7 +86,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       path: '/socket.io',
       // Called on every (re)connection attempt: always the latest in-memory token.
       auth: (cb) => cb({ token: accessToken() ?? '' }),
-      transports: ['websocket', 'polling'],
+      // Socket.IO's default order: start with HTTP long-polling, then upgrade to WebSocket.
+      // Behind a proxy that can't carry WebSockets (e.g. a Vercel rewrite) it stays on polling.
+      transports: ['polling', 'websocket'],
     });
     setSocket(s);
 

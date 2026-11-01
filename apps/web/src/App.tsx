@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AppShell } from './components/AppShell';
+import { ErrorBoundary, Loading } from './components/ui';
 import { LoginPage, RegisterPage } from './pages/AuthPages';
 import { DashboardPage } from './pages/DashboardPage';
 import { HistoryPage } from './pages/HistoryPage';
@@ -15,9 +16,9 @@ function AppRoutes() {
   const { status } = useAuth();
   if (status === 'loading') {
     return (
-      <p className="p-8 text-center text-slate-500" data-testid="loading">
-        Loading StudySync…
-      </p>
+      <div className="flex justify-center p-8">
+        <Loading label="Loading StudySync…" />
+      </div>
     );
   }
   if (status === 'anonymous') {
@@ -48,10 +49,12 @@ function AppRoutes() {
 
 export function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

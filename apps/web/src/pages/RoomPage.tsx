@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router';
+import { Link, useParams } from 'react-router';
 import { displayPhase, uuidSchema } from '@studysync/shared';
 import { MembersList } from '../components/MembersList';
 import { TaskList } from '../components/TaskList';
 import { TodayInRoom } from '../components/TodayInRoom';
 import { SessionSummary } from '../components/SessionSummary';
 import { TimerPanel } from '../components/TimerPanel';
-import { ErrorNote } from '../components/ui';
+import { ErrorNote, Loading } from '../components/ui';
 import { useAuth } from '../auth/AuthContext';
 import { useNow } from '../lib/useNow';
 import { useStudyRoom } from '../realtime/useStudyRoom';
@@ -118,7 +118,23 @@ function Room({ roomId }: { roomId: string }) {
       <ErrorNote message={state.error} onDismiss={dismissError} />
       <ErrorNote message={timer.error} onDismiss={timer.clearError} />
 
-      {!state.inRoom ? (
+      {!state.inRoom && !state.room && state.error ? (
+        <section
+          className="rounded-lg bg-white p-6 text-center shadow-sm"
+          data-testid="room-unavailable"
+        >
+          <p className="text-slate-700">
+            This room doesn’t exist, or you are not a member. Ask a member for the room code.
+          </p>
+          <Link to="/" className="mt-3 inline-block text-indigo-700 underline">
+            Back to the dashboard
+          </Link>
+        </section>
+      ) : !state.inRoom && !state.room ? (
+        <div className="flex justify-center p-6">
+          <Loading label="Entering the room…" />
+        </div>
+      ) : !state.inRoom ? (
         <section className="rounded-lg bg-white p-6 text-center shadow-sm" data-testid="left-room">
           <p className="text-slate-700">You are not in this room right now.</p>
           <button
@@ -127,7 +143,7 @@ function Room({ roomId }: { roomId: string }) {
             onClick={() => void join()}
             className="mt-3 rounded-md bg-indigo-600 px-4 py-2 font-semibold text-white hover:bg-indigo-700"
           >
-            {state.room ? 'Rejoin room' : 'Joining…'}
+            Rejoin room
           </button>
         </section>
       ) : (

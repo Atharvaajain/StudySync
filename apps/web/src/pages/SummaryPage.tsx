@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { uuidSchema, type SessionSummaryDto } from '@studysync/shared';
 import { SessionSummary } from '../components/SessionSummary';
-import { ErrorNote } from '../components/ui';
+import { ErrorNote, Loading } from '../components/ui';
 import { api, errorMessage } from '../lib/api';
 
 export function SummaryPage() {
@@ -26,7 +26,7 @@ export function SummaryPage() {
         ← History
       </Link>
       <ErrorNote message={error} />
-      {summary && <SessionSummary summary={summary} />}
+      {summary ? <SessionSummary summary={summary} /> : !error && <Loading />}
     </div>
   );
 }
