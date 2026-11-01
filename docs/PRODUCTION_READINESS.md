@@ -25,7 +25,7 @@
 | 13 | Through a Vercel-like proxy (static web, HTTP-only rewrites, no WebSocket) — smoke | ✅ 11 / 13, both misses expected (§6) | Rehearsal |
 | 14 | Two real browsers through that proxy: rooms, live status over long-polling (82 ms), sign-in survives reload | ✅ | Rehearsal |
 | 15 | Deployment configuration and documentation | ✅ | `render.yaml`, `deploy/`, `docs/DEPLOYMENT.md` |
-| 16 | CI on GitHub (last pushed commit) | ✅ | Actions run 41296072137 (commit 8e85f3c), both jobs |
+| 16 | CI on GitHub | ✅ | Actions run 41312363525 (commit 5199f54), both jobs, after fixing two timing-dependent E2E tests (§7) |
 
 ## 2. Requirement verification (highlights)
 
@@ -86,3 +86,4 @@ These were **not** built here because this stage excluded new features. Each nee
 | The room screen said "not a member" for every join error, including "your session lives in another room" | It shows the real reason; the not-found text only for NOT_FOUND |
 | The smoke test couldn't check a backend that doesn't serve the web app | `--api-only` mode |
 | Deployment config assumed Render served the web app | Render is API-only by default (`TRUST_PROXY=2`); Vercel builds from the repository root |
+| Two E2E tests failed intermittently in CI (test timing, not app defects): the charts test jumped the test clock again before the client's token-expiry reconnect finished, so the 2-minute grace correctly auto-saved the session; Phase 0 test 6 read a timer that hadn't synced with another page's clock jump | The tests wait for the reconnect and the clock sync; assertions unchanged; CI now uploads failure screenshots and traces |
