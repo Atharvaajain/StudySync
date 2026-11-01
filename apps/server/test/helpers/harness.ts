@@ -215,6 +215,7 @@ export async function startHarness(
     httpRateLimits?: HttpRateLimits;
     start?: number;
     accessTokenTtlSec?: number;
+    newRoomCode?: () => string;
   } = {},
 ): Promise<Harness> {
   const db = testDb();
@@ -242,6 +243,7 @@ export async function startHarness(
       logger: createLogger('silent'),
       rateLimits: options.rateLimits ?? NO_LIMITS,
       maintenanceIntervalMs: 0, // tests run `maintenance.tick()` explicitly
+      ...(options.newRoomCode ? { newRoomCode: options.newRoomCode } : {}),
       ...(options.httpRateLimits ? { httpRateLimits: options.httpRateLimits } : {}),
     });
     const address = await instance.listen(0, '127.0.0.1');
