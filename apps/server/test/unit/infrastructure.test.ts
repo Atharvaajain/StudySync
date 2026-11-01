@@ -102,6 +102,7 @@ describe('SocketRateLimiter', () => {
     const limiter = new SocketRateLimiter(
       {
         timer: { capacity: 2, perMs: 1_000 },
+        task: { capacity: 1, perMs: 1_000 },
         room: { capacity: 1, perMs: 1_000 },
         sync: { capacity: 1, perMs: 1_000 },
       },
@@ -118,25 +119,43 @@ describe('SocketRateLimiter', () => {
 });
 
 describe('environment guard (§17.6)', () => {
+  const base = {
+    DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
+    JWT_ACCESS_SECRET: 'x'.repeat(32),
+  };
+
   it('has safe defaults', () => {
-    expect(loadEnv({})).toMatchObject({
+    expect(loadEnv(base)).toMatchObject({
       NODE_ENV: 'development',
       PORT: 4000,
       HOST: '127.0.0.1',
       ENABLE_TEST_CLOCK: false,
+      RELAX_RATE_LIMITS: false,
+      ACCESS_TOKEN_TTL_SEC: 900,
+      REFRESH_TOKEN_TTL_DAYS: 30,
+      BCRYPT_COST: 12,
+      COOKIE_SECURE: true,
     });
   });
 
-  it('refuses production: the prototype has no authentication', () => {
-    expect(() => loadEnv({ NODE_ENV: 'production' })).toThrow(
-      /must not run with NODE_ENV=production/,
-    );
+  it('requires a database URL and a JWT secret of at least 32 characters', () => {
+    expect(() => loadEnv({})).toThrow(/DATABASE_URL/);
+    expect(() => loadEnv({ ...base, JWT_ACCESS_SECRET: 'short' })).toThrow(/JWT_ACCESS_SECRET/);
   });
 
-  it('refuses the test clock outside NODE_ENV=test', () => {
-    expect(() => loadEnv({ NODE_ENV: 'development', ENABLE_TEST_CLOCK: 'true' })).toThrow(
-      /only allowed with NODE_ENV=test/,
-    );
-    expect(loadEnv({ NODE_ENV: 'test', ENABLE_TEST_CLOCK: 'true' }).ENABLE_TEST_CLOCK).toBe(true);
+  it('refuses production until the pre-launch phase', () => {
+    expect(() => loadEnv({ ...base, NODE_ENV: 'production' })).toThrow(/NODE_ENV=production/);
+  });
+
+  it('allows test-only switches with NODE_ENV=test only', () => {
+    expect(() => loadEnv({ ...base, ACCESS_TOKEN_TTL_SEC: '3600' })).toThrow(/NODE_ENV=test/);
+    for (const flag of ['ENABLE_TEST_CLOCK', 'RELAX_RATE_LIMITS']) {
+      expect(() => loadEnv({ ...base, NODE_ENV: 'development', [flag]: 'true' })).toThrow(
+        /only allowed with NODE_ENV=test/,
+      );
+    }
+    expect(() => loadEnv({ ...base, BCRYPT_COST: '4' })).toThrow(/BCRYPT_COST/);
+    const env = loadEnv({ ...base, NODE_ENV: 'test', ENABLE_TEST_CLOCK: 'true', BCRYPT_COST: '4' });
+    expect(env).toMatchObject({ ENABLE_TEST_CLOCK: true, BCRYPT_COST: 4 });
   });
 });

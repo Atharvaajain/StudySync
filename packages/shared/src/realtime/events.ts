@@ -1,6 +1,7 @@
 /**
  * Typed Socket.IO contract (API_DESIGN §7–§8). Event names are the spec's names, verbatim.
- * Phase 0 subset: room presence, the four timer commands and resync.
+ * Phase 1: room presence (Phase 0 room), the timer commands, task attach, personal tasks,
+ * resync and token renewal.
  */
 import type { ErrorCode } from '../errors';
 import type {
@@ -9,15 +10,22 @@ import type {
   SessionDto,
   SessionStatePayload,
   SessionSummaryDto,
+  TaskDto,
 } from '../dto';
 import type {
+  AuthRenewPayload,
   EndStudyPayload,
   JoinRoomPayload,
   LeaveRoomPayload,
   ResumeStudyPayload,
+  SetSessionTaskPayload,
   StartStudyPayload,
   SyncStatePayload,
   TakeBreakPayload,
+  TaskAddPayload,
+  TaskDeletePayload,
+  TaskTogglePayload,
+  TaskUpdatePayload,
 } from '../schemas';
 
 export interface AckError {
@@ -36,7 +44,19 @@ export interface ClientToServerEvents {
   take_break: (payload: TakeBreakPayload, ack: Ack<{ session: SessionDto }>) => void;
   resume_study: (payload: ResumeStudyPayload, ack: Ack<{ session: SessionDto }>) => void;
   end_study: (payload: EndStudyPayload, ack: Ack<{ summary: SessionSummaryDto }>) => void;
+  set_session_task: (payload: SetSessionTaskPayload, ack: Ack<{ session: SessionDto }>) => void;
+  task_add: (payload: TaskAddPayload, ack: Ack<{ task: TaskDto }>) => void;
+  task_toggle: (payload: TaskTogglePayload, ack: Ack<{ task: TaskDto }>) => void;
+  task_update: (payload: TaskUpdatePayload, ack: Ack<{ task: TaskDto }>) => void;
+  task_delete: (payload: TaskDeletePayload, ack: Ack<Record<string, never>>) => void;
   sync_state: (payload: SyncStatePayload, ack: Ack<SessionStatePayload>) => void;
+  auth_renew: (payload: AuthRenewPayload, ack: Ack<{ expiresAt: string }>) => void;
+}
+
+export interface PersonalTaskUpdatedPayload {
+  action: 'added' | 'updated' | 'deleted';
+  task?: TaskDto;
+  taskId: string;
 }
 
 export interface ServerToClientEvents {
@@ -44,6 +64,8 @@ export interface ServerToClientEvents {
   member_joined: (payload: { roomId: string; member: MemberStatusDto }) => void;
   member_left: (payload: { roomId: string; userId: string }) => void;
   status_changed: (payload: { roomId: string; member: MemberStatusDto }) => void;
+  personal_task_updated: (payload: PersonalTaskUpdatedPayload) => void;
+  auth_expired: (payload: Record<string, never>) => void;
 }
 
 /** Channel names (ARCHITECTURE §12.2). */

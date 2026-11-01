@@ -1,0 +1,268 @@
+// Approved schema: copied verbatim from DATABASE_DESIGN.md §4 (Prisma 6, prisma-client-js).
+// Hand-written constraints (§5) live in the migrations. Never let a generated migration drop them.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // includes options=-c timezone=UTC
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum SessionStatus {
+  ACTIVE
+  ENDED
+}
+
+enum SessionEndReason {
+  USER // End Study
+  DISCONNECTED // 2-min grace expired (auto-save)
+  IDLE_TIMEOUT // 30 min in Break Over (auto-save)
+}
+
+enum SegmentEndReason {
+  BREAK
+  ENDED_BY_USER
+  DISCONNECTED
+  ROOM_MOVE // solo session moved into a room; a new segment continues immediately
+}
+
+enum BreakCloseReason {
+  RESUMED
+  ENDED_BY_USER
+  DISCONNECTED
+  IDLE_TIMEOUT
+}
+
+enum TaskStatus {
+  TODO
+  DONE
+}
+
+enum TimerPhase {
+  NO_SESSION
+  STUDYING
+  ON_BREAK
+  BREAK_OVER
+  ENDED
+}
+
+enum SessionEventType {
+  STARTED
+  BREAK_TAKEN
+  RESUMED
+  ENDED
+  MOVED_TO_ROOM
+  TASK_SET
+  DISCONNECTED
+  LEASE_LOST
+  RECONNECTED
+  GRACE_EXPIRED
+  IDLE_TIMEOUT
+}
+
+enum EventActor {
+  USER
+  SYSTEM
+}
+
+// ───────────────────────── Identity ─────────────────────────
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(50)
+  email        String   @unique @db.VarChar(254) // lower-cased (CHECK)
+  passwordHash String   @map("password_hash") @db.VarChar(100)
+  timezone     String   @db.VarChar(64) // IANA, validated in app
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  refreshTokens  RefreshToken[]
+  roomsCreated   Room[]         @relation("RoomCreatedBy")
+  memberships    RoomMember[]
+  tasks          Task[]         @relation("TaskOwner")
+  tasksCompleted Task[]         @relation("TaskCompletedBy")
+  sessions       StudySession[]
+  segments       StudySegment[]
+  breaks         StudyBreak[]
+  sessionEvents  SessionEvent[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  familyId     String    @map("family_id") @db.Uuid
+  tokenHash    String    @unique @map("token_hash") @db.Char(64) // SHA-256 hex
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
+  replacedById String?   @map("replaced_by_id") @db.Uuid
+  userAgent    String?   @map("user_agent") @db.VarChar(255)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+// ───────────────────────── Rooms ─────────────────────────
+// R2: rooms carry NO timer state. Never add timer columns here.
+
+model Room {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @db.VarChar(60)
+  code        String   @unique @db.Char(6) // ^[A-HJ-NP-Z2-9]{6}$ (CHECK)
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  createdBy User           @relation("RoomCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  members   RoomMember[]
+  tasks     Task[]
+  sessions  StudySession[]
+  segments  StudySegment[]
+
+  @@map("rooms")
+}
+
+// D-2: membership is permanent in the MVP: rows are never deleted.
+model RoomMember {
+  roomId        String    @map("room_id") @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  joinedAt      DateTime  @default(now()) @map("joined_at") @db.Timestamptz(3)
+  lastVisitedAt DateTime? @map("last_visited_at") @db.Timestamptz(3)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, userId]) // spec: unique together
+  @@index([userId, lastVisitedAt(sort: Desc)])
+  @@map("room_members")
+}
+
+// ───────────────────────── Tasks ─────────────────────────
+
+model Task {
+  id            String     @id @db.Uuid // client-generated → idempotent task_add
+  userId        String     @map("user_id") @db.Uuid // personal: owner · room: creator
+  roomId        String?    @map("room_id") @db.Uuid // NULL = personal
+  title         String     @db.VarChar(200)
+  description   String?    @db.VarChar(2000)
+  status        TaskStatus @default(TODO)
+  dueDate       DateTime?  @map("due_date") @db.Date // calendar date, no timezone
+  version       Int        @default(1)
+  completedAt   DateTime?  @map("completed_at") @db.Timestamptz(3)
+  completedById String?    @map("completed_by_id") @db.Uuid
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt     DateTime?  @map("deleted_at") @db.Timestamptz(3)
+
+  user        User           @relation("TaskOwner", fields: [userId], references: [id], onDelete: Cascade)
+  room        Room?          @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  completedBy User?          @relation("TaskCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  sessions    StudySession[]
+
+  // partial indexes in §5
+  @@map("tasks")
+}
+
+// ───────────────────────── Timer ─────────────────────────
+
+model StudySession {
+  id                      String            @id @default(uuid()) @db.Uuid
+  userId                  String            @map("user_id") @db.Uuid
+  roomId                  String?           @map("room_id") @db.Uuid // NULL = solo
+  taskId                  String?           @map("task_id") @db.Uuid // NULL = none
+  status                  SessionStatus     @default(ACTIVE)
+  startedAt               DateTime          @map("started_at") @db.Timestamptz(3)
+  endedAt                 DateTime?         @map("ended_at") @db.Timestamptz(3)
+  endReason               SessionEndReason? @map("end_reason")
+  currentSegmentStartedAt DateTime?         @map("current_segment_started_at") @db.Timestamptz(3) // non-null iff STUDYING
+  breakEndsAt             DateTime?         @map("break_ends_at") @db.Timestamptz(3) // non-null iff ON_BREAK or BREAK_OVER
+  lastSeenAt              DateTime          @map("last_seen_at") @db.Timestamptz(3) // liveness lease
+  disconnectedAt          DateTime?         @map("disconnected_at") @db.Timestamptz(3) // grace started
+  summarySeenAt           DateTime?         @map("summary_seen_at") @db.Timestamptz(3)
+  version                 Int               @default(1)
+  createdAt               DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room     Room?          @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  task     Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  segments StudySegment[]
+  breaks   StudyBreak[]
+  events   SessionEvent[]
+
+  @@index([userId, startedAt(sort: Desc)])
+  @@index([roomId])
+  // one-ACTIVE-per-user + sweeper/lease partial indexes in §5
+  @@map("study_sessions")
+}
+
+model StudySegment {
+  id        String            @id @default(uuid()) @db.Uuid
+  sessionId String            @map("session_id") @db.Uuid
+  userId    String            @map("user_id") @db.Uuid
+  roomId    String?           @map("room_id") @db.Uuid // snapshot: NULL = solo study
+  timezone  String            @db.VarChar(64) // snapshot of users.timezone at segment start (I-10, D-6); never updated
+  startedAt DateTime          @map("started_at") @db.Timestamptz(3)
+  endedAt   DateTime?         @map("ended_at") @db.Timestamptz(3) // NULL = currently studying
+  endReason SegmentEndReason? @map("end_reason")
+  createdAt DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room    Room?        @relation(fields: [roomId], references: [id], onDelete: Restrict)
+
+  @@index([userId, startedAt])
+  @@index([roomId, startedAt])
+  @@index([sessionId, startedAt])
+  @@map("study_segments")
+}
+
+model StudyBreak {
+  id              String            @id @default(uuid()) @db.Uuid
+  sessionId       String            @map("session_id") @db.Uuid
+  userId          String            @map("user_id") @db.Uuid
+  durationMinutes Int               @map("duration_minutes") // 5 | 10 | 15 | 30 (CHECK)
+  startedAt       DateTime          @map("started_at") @db.Timestamptz(3)
+  endsAt          DateTime          @map("ends_at") @db.Timestamptz(3) // = started_at + duration (CHECK)
+  closedAt        DateTime?         @map("closed_at") @db.Timestamptz(3) // resume / end / auto-save
+  closeReason     BreakCloseReason? @map("close_reason")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, startedAt])
+  @@index([userId, startedAt])
+  @@map("study_breaks")
+}
+
+model SessionEvent {
+  id         BigInt           @id @default(autoincrement())
+  sessionId  String           @map("session_id") @db.Uuid
+  userId     String           @map("user_id") @db.Uuid
+  type       SessionEventType
+  actor      EventActor
+  fromPhase  TimerPhase       @map("from_phase")
+  toPhase    TimerPhase       @map("to_phase")
+  occurredAt DateTime         @map("occurred_at") @db.Timestamptz(3) // deadline instant for SYSTEM events
+  recordedAt DateTime         @default(now()) @map("recorded_at") @db.Timestamptz(3)
+  commandId  String?          @map("command_id") @db.Uuid
+  payload    Json?
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commandId]) // idempotency; NULLs are distinct
+  @@index([sessionId, id])
+  @@index([recordedAt])
+  @@map("session_events")
+}

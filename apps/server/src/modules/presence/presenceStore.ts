@@ -44,6 +44,12 @@ export class PresenceStore {
     return previous;
   }
 
+  /** Restores a socket's room (used to undo a join that failed half-way). */
+  setSocketRoom(socketId: string, roomId: string | null): void {
+    if (roomId === null) this.socketRoom.delete(socketId);
+    else this.socketRoom.set(socketId, roomId);
+  }
+
   /** Removes every socket of `userId` from `roomId`; returns the socket ids that left. */
   leaveRoom(userId: string, roomId: string): string[] {
     const left: string[] = [];

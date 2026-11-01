@@ -17,6 +17,7 @@ const ctx = (now: number, room: string | null = ROOM): DecideContext => ({
 const studying = (overrides: Partial<SessionCore> = {}): SessionCore => ({
   id: SID,
   roomId: ROOM,
+  taskId: null,
   startedAt: T - 30 * MIN,
   currentSegmentStartedAt: T - 30 * MIN,
   currentBreak: null,
@@ -144,10 +145,49 @@ describe('start', () => {
     expect(r.ok && r.next).toEqual({
       id: SID,
       roomId: ROOM,
+      taskId: null,
       startedAt: T,
       currentSegmentStartedAt: T,
       currentBreak: null,
       version: 1,
+    });
+  });
+});
+
+describe('attach a task (row 12, F-29)', () => {
+  const TASK = 'cccccccc-0000-4000-8000-000000000001';
+
+  it('start can carry a task; set_task changes it in any phase without changing the phase', () => {
+    const started = decide(null, { type: 'START', roomId: ROOM, taskId: TASK }, ctx(T));
+    expect(started.ok && started.next?.taskId).toBe(TASK);
+    expect(started.ok && started.effects[0]).toEqual({
+      type: 'CREATE_SESSION',
+      at: T,
+      roomId: ROOM,
+      taskId: TASK,
+    });
+
+    const onBreak = studying({
+      currentSegmentStartedAt: null,
+      currentBreak: { durationMinutes: 5, startedAt: T, endsAt: T + 5 * MIN },
+      taskId: TASK,
+      version: 2,
+    });
+    const cleared = decide(
+      onBreak,
+      { type: 'SET_TASK', sessionId: SID, taskId: null },
+      ctx(T + MIN),
+    );
+    expect(cleared.ok && cleared.next).toMatchObject({
+      taskId: null,
+      version: 3,
+      currentBreak: onBreak.currentBreak,
+    });
+    expect(cleared.ok && cleared.effects).toEqual([{ type: 'SET_TASK', taskId: null }]);
+    expect(cleared.ok && cleared.event).toMatchObject({
+      type: 'TASK_SET',
+      fromPhase: 'ON_BREAK',
+      toPhase: 'ON_BREAK',
     });
   });
 });

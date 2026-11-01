@@ -1,5 +1,10 @@
+import { existsSync } from 'node:fs';
 import { loadEnv } from './config/env';
 import { createStudySyncServer } from './server';
+
+// Local development: apps/server/.env (gitignored; see .env.example). Real env vars win.
+const envFile = new URL('../.env', import.meta.url);
+if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 const env = loadEnv();
 const server = createStudySyncServer({ env });
@@ -10,7 +15,7 @@ server.logger.info(
     nodeEnv: env.NODE_ENV,
     staticDir: env.STATIC_DIR,
   },
-  'StudySync Phase 0 server listening',
+  'StudySync server listening',
 );
 
 let shuttingDown = false;

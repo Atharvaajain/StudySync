@@ -44,6 +44,17 @@ export default defineConfig(
     },
   },
   {
+    // CLAUDE.md: raw SQL only through tagged templates (parameterized), never the Unsafe APIs.
+    files: ['apps/server/**/*.ts'],
+    rules: {
+      'no-restricted-properties': [
+        'error',
+        { property: '$queryRawUnsafe', message: 'Banned: use the $queryRaw tagged template.' },
+        { property: '$executeRawUnsafe', message: 'Banned: use the $executeRaw tagged template.' },
+      ],
+    },
+  },
+  {
     // CLAUDE.md: domain code never reads the wall clock — time comes from the injected Clock.
     files: ['packages/shared/src/timer/machine.ts', 'apps/server/src/modules/**/*.ts'],
     rules: {

@@ -100,3 +100,78 @@ export interface JoinRoomResult {
   session: SessionDto | null;
   serverNow: Instant;
 }
+
+// ───────────── Phase 1 (API_DESIGN §2, §5) ─────────────
+
+export type LocalDate = string;
+
+export interface UserDto {
+  id: string;
+  name: string;
+  email: string;
+  timezone: string;
+  createdAt: Instant;
+}
+
+export interface AuthResponse {
+  user: UserDto;
+  accessToken: string;
+  accessTokenExpiresAt: Instant;
+}
+
+export interface TaskDto {
+  id: string;
+  roomId: string | null;
+  title: string;
+  description: string | null;
+  status: 'TODO' | 'DONE';
+  dueDate: LocalDate | null;
+  version: number;
+  createdBy: UserRef;
+  completedBy: UserRef | null;
+  completedAt: Instant | null;
+  createdAt: Instant;
+  updatedAt: Instant;
+}
+
+export interface TodayDto {
+  localDate: LocalDate;
+  timezone: string;
+  soloMs: number;
+  roomsMs: number;
+  totalMs: number;
+  thresholdMs: number;
+  qualified: boolean;
+  serverNow: Instant;
+}
+
+export interface DailyStatsDto {
+  timezone: string;
+  days: { date: LocalDate; soloMs: number; roomsMs: number; totalMs: number; qualified: boolean }[];
+}
+
+export interface StreakDto {
+  current: number;
+  longest: number;
+  currentStart: LocalDate | null;
+  lastQualifiedDate: LocalDate | null;
+  todayQualified: boolean;
+  todayMs: number;
+  thresholdMs: number;
+  atRisk: boolean;
+}
+
+export interface SessionHistoryItem {
+  id: string;
+  startedAt: Instant;
+  endedAt: Instant | null;
+  endReason: EndReason | null;
+  roomId: string | null;
+  roomName: string | null;
+  studiedMs: number;
+}
+
+export interface SessionHistoryPage {
+  items: SessionHistoryItem[];
+  nextCursor: string | null;
+}

@@ -3,26 +3,44 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "StudySync server — Express + Socket.IO. Phase 0: in-memory real-time prototype.",
+  "description": "StudySync server \u2014 Express + Socket.IO + Prisma/PostgreSQL.",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "node scripts/build.mjs",
     "start": "node dist/index.js",
     "start:e2e": "tsx src/index.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "postinstall": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:reset": "prisma migrate reset --force",
+    "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@prisma/client": "6.19.3",
     "@studysync/shared": "*",
+    "bcryptjs": "3.0.3",
+    "cookie-parser": "1.4.7",
     "express": "5.3.0",
+    "express-rate-limit": "8.7.2",
     "helmet": "8.3.0",
+    "jsonwebtoken": "9.0.3",
     "pino": "10.4.0",
     "socket.io": "4.8.4",
     "zod": "4.3.3"
   },
   "devDependencies": {
+    "@types/cookie-parser": "1.4.10",
     "@types/express": "5.0.6",
+    "@types/jsonwebtoken": "9.0.10",
+    "@types/supertest": "7.2.1",
     "esbuild": "0.28.2",
+    "prisma": "6.19.3",
     "socket.io-client": "4.8.4",
+    "supertest": "7.3.1",
     "tsx": "4.23.15"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   }
 }

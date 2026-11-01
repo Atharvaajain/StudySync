@@ -1,4 +1,4 @@
-import type { SessionCause } from '@studysync/shared';
+import type { SessionCause, TaskDto } from '@studysync/shared';
 
 /**
  * Domain events, published only AFTER a change is committed (ARCHITECTURE §9.7, "emit after
@@ -9,7 +9,14 @@ export type DomainEvent =
   | { type: 'session_changed'; userId: string; cause: SessionCause }
   | { type: 'member_status_changed'; roomId: string; userId: string }
   | { type: 'member_joined'; roomId: string; userId: string }
-  | { type: 'member_left'; roomId: string; userId: string };
+  | { type: 'member_left'; roomId: string; userId: string }
+  | {
+      type: 'personal_task_changed';
+      userId: string;
+      action: 'added' | 'updated' | 'deleted';
+      taskId: string;
+      task?: TaskDto;
+    };
 
 export type DomainEventListener = (event: DomainEvent) => void;
 

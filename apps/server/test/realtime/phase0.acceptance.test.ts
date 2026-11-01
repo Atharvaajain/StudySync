@@ -1,7 +1,7 @@
 /**
  * Phase 0 acceptance tests — the nine required scenarios, against the real server with real
- * Socket.IO clients and a controlled server clock. After every test the store's integrity
- * audit (DATABASE_DESIGN §8 equivalent) must report no violations.
+ * Socket.IO clients and a controlled server clock. Since Phase 1 they run on PostgreSQL with
+ * real JWTs; after every test the invariant audits (DATABASE_DESIGN §8, A–H) must return no rows.
  *
  *   AC-1 two browsers join the same room          AC-6 refresh while studying
  *   AC-2 both start independent timers            AC-7 refresh while on break
@@ -12,6 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionDto } from '@studysync/shared';
+import { audit, testDb } from '../helpers/db';
 import { MIN, ROOM_ID, elapsedAt, startHarness, twoInRoom, type Harness } from '../helpers/harness';
 
 let h: Harness;
@@ -21,8 +22,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  expect(h.server.store.audit()).toEqual([]);
   await h.close();
+  expect(await audit()).toEqual([]);
 });
 
 describe('AC-1 two browsers join the same room', () => {
@@ -428,7 +429,7 @@ describe('AC-8 invalid state transitions are rejected by the server', () => {
     expect((await outside.end(s.id)).studiedMs).toBe(0);
   });
 
-  it('unknown room, unattachable task, missing identity and too many sockets', async () => {
+  it('unknown room, unattachable task, missing or invalid token and too many sockets', async () => {
     const a = await h.connect('Alice');
     expect(code(await a.call('join_room', { roomId: randomUUID() }))).toBe('NOT_FOUND');
     expect(code(await a.call('join_room', { roomId: 'not-a-uuid' }))).toBe('VALIDATION_ERROR');
@@ -444,12 +445,13 @@ describe('AC-8 invalid state transitions are rejected by the server', () => {
     ).toBe('TASK_NOT_ATTACHABLE');
 
     expect(await h.connectExpectingError({})).toBe('UNAUTHENTICATED');
-    expect(await h.connectExpectingError({ userId: 'nope', name: 'X' })).toBe('UNAUTHENTICATED');
-    expect(await h.connectExpectingError({ userId: randomUUID(), name: '   ' })).toBe(
+    expect(await h.connectExpectingError({ token: 'not-a-jwt' })).toBe('UNAUTHENTICATED');
+    // The Phase 0 self-declared identity is gone.
+    expect(await h.connectExpectingError({ userId: a.userId, name: 'Alice' })).toBe(
       'UNAUTHENTICATED',
     );
     for (let i = 0; i < 4; i++) await h.connect('Alice', { userId: a.userId }); // 5 sockets in total
-    expect(await h.connectExpectingError({ userId: a.userId, name: 'Alice' })).toBe(
+    expect(await h.connectExpectingError({ token: h.tokenFor(a.userId) })).toBe(
       'TOO_MANY_CONNECTIONS',
     );
   });
@@ -459,6 +461,7 @@ describe('AC-8 invalid state transitions are rejected by the server', () => {
     h = await startHarness({
       rateLimits: {
         timer: { capacity: 2, perMs: 60_000 },
+        task: { capacity: 5, perMs: 60_000 },
         room: { capacity: 5, perMs: 60_000 },
         sync: { capacity: 5, perMs: 60_000 },
       },
@@ -496,10 +499,10 @@ describe('AC-9 multiple simultaneous requests', () => {
     expect(results.filter((r) => !r.ok && r.error.code === 'SESSION_ALREADY_ACTIVE')).toHaveLength(
       19,
     );
-    const active = h.server.store
-      .allSessions()
-      .filter((s) => s.userId === tabs[0]!.userId && s.status === 'ACTIVE');
-    expect(active).toHaveLength(1);
+    const active = await testDb().studySession.count({
+      where: { userId: tabs[0]!.userId, status: 'ACTIVE' },
+    });
+    expect(active).toBe(1);
   });
 
   it('CT-2: parallel take_break + end_study + resume_study are serialized into a consistent history', async () => {
@@ -548,9 +551,12 @@ describe('AC-9 multiple simultaneous requests', () => {
       x.ok ? (x.data as { session: SessionDto }).session : null,
     );
     expect(new Set(sessions.map((x) => JSON.stringify(x))).size).toBe(1);
-    const breaks = h.server.store.eventsOf(s.id).filter((e) => e.type === 'BREAK_TAKEN');
-    expect(breaks).toHaveLength(1);
-    expect(h.server.store.breaksOf(s.id)).toHaveLength(1);
+    const db = testDb();
+    expect(await db.sessionEvent.count({ where: { sessionId: s.id, type: 'BREAK_TAKEN' } })).toBe(
+      1,
+    );
+    expect(await db.sessionEvent.count({ where: { commandId } })).toBe(1);
+    expect(await db.studyBreak.count({ where: { sessionId: s.id } })).toBe(1);
   });
 
   it('two users acting at the same time never affect each other', async () => {
@@ -561,6 +567,6 @@ describe('AC-9 multiple simultaneous requests', () => {
     const [stateA, stateB] = await Promise.all([a.sync(), b.sync()]);
     expect(stateA.session).toMatchObject({ id: sa.id, phase: 'ON_BREAK', studyMsClosed: 10 * MIN });
     expect(stateB.session).toBeNull();
-    expect(h.server.sessions.summary(sb.id).studiedMs).toBe(10 * MIN);
+    expect((await h.server.sessions.summaryFor(b.userId, sb.id)).studiedMs).toBe(10 * MIN);
   });
 });

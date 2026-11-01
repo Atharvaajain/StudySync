@@ -1,6 +1,7 @@
 /**
- * PHASE 0 ONLY — self-declared user identities (name + client-generated id). There is no
- * authentication in the prototype; Phase 1 replaces this with registered users and JWTs.
+ * Display-name cache for room status pushes (synchronous lookups on the hot path).
+ * Filled from the database on socket connect, when room members are loaded and on profile
+ * edits. The database stays the source of truth.
  */
 export class UserDirectory {
   private readonly names = new Map<string, string>();
@@ -10,6 +11,6 @@ export class UserDirectory {
   }
 
   nameOf(userId: string): string {
-    return this.names.get(userId) ?? 'Unknown';
+    return this.names.get(userId) ?? 'Member';
   }
 }

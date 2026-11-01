@@ -20,12 +20,16 @@ export default defineConfig({
         },
       },
       {
+        // Real PostgreSQL (studysync_test). Files run one at a time: they share the database.
         test: {
-          name: 'server-realtime',
+          name: 'server-db',
           root: './apps/server',
-          include: ['test/realtime/**/*.test.ts'],
+          include: ['test/integration/**/*.test.ts', 'test/realtime/**/*.test.ts'],
           environment: 'node',
-          testTimeout: 20_000,
+          globalSetup: ['./test/globalSetup.ts'],
+          fileParallelism: false,
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
         },
       },
     ],

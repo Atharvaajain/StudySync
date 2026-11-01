@@ -45,8 +45,10 @@ export class MemberStatusService {
   }
 
   /** All members of the room, absent ones included (I-18). */
-  members(roomId: string): MemberStatusDto[] {
-    return this.deps.rooms.membersOf(roomId).map((m) => this.snapshot(roomId, m.userId));
+  async members(roomId: string): Promise<MemberStatusDto[]> {
+    const rows = await this.deps.rooms.members(roomId);
+    for (const m of rows) this.deps.users.upsert(m.userId, m.name);
+    return rows.map((m) => this.snapshot(roomId, m.userId));
   }
 
   startDisplayGrace(roomId: string, userId: string): void {

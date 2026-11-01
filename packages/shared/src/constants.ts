@@ -39,3 +39,10 @@ const MINUTE_MS = 60_000;
 export function minutesToMs(minutes: number): number {
   return minutes * MINUTE_MS;
 }
+
+/** API_DESIGN §1 / ARCHITECTURE §17. */
+export const CSRF_HEADER = 'X-StudySync-CSRF';
+export const REFRESH_COOKIE = 'ss_refresh';
+export const PERSONAL_TASK_LIMIT = 1_000;
+export const HISTORY_PAGE_MAX = 100;
+export const STATS_MAX_RANGE_DAYS = 366;

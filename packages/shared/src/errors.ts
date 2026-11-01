@@ -1,9 +1,17 @@
-/** Error codes used in socket acks (API_DESIGN §3). Phase 0 subset. */
+/** Error codes used in REST responses and socket acks (API_DESIGN §3). */
 export const ERROR_CODES = [
   'VALIDATION_ERROR',
+  'INVALID_TIMEZONE',
   'UNAUTHENTICATED',
+  'TOKEN_EXPIRED',
+  'INVALID_CREDENTIALS',
+  'REFRESH_INVALID',
+  'REFRESH_REUSED',
+  'CSRF_REQUIRED',
+  'FORBIDDEN',
   'TOO_MANY_CONNECTIONS',
   'NOT_FOUND',
+  'EMAIL_TAKEN',
   'ROOM_FULL',
   'RATE_LIMITED',
   'SESSION_ALREADY_ACTIVE',
@@ -16,6 +24,9 @@ export const ERROR_CODES = [
   'NOT_IN_SESSION_ROOM',
   'SESSION_IN_OTHER_ROOM',
   'TASK_NOT_ATTACHABLE',
+  'VERSION_CONFLICT',
+  'ID_CONFLICT',
+  'TASK_LIMIT_REACHED',
   'INTERNAL',
 ] as const;
 
@@ -38,9 +49,17 @@ export type TimerRejectionCode = Extract<
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   VALIDATION_ERROR: 'The request is not valid.',
-  UNAUTHENTICATED: 'Identify yourself before connecting.',
+  INVALID_TIMEZONE: 'That is not a valid timezone.',
+  UNAUTHENTICATED: 'Please log in.',
+  TOKEN_EXPIRED: 'Your login has expired. Please refresh.',
+  INVALID_CREDENTIALS: 'Email or password is incorrect.',
+  REFRESH_INVALID: 'Your login has expired. Please log in again.',
+  REFRESH_REUSED: 'For your security you have been logged out. Please log in again.',
+  CSRF_REQUIRED: 'Missing security header.',
+  FORBIDDEN: 'You are not allowed to do that.',
   TOO_MANY_CONNECTIONS: 'Too many open connections for this user.',
   NOT_FOUND: 'Not found.',
+  EMAIL_TAKEN: 'An account with this email already exists.',
   ROOM_FULL: 'This room is full.',
   RATE_LIMITED: 'Too many requests. Slow down a little.',
   SESSION_ALREADY_ACTIVE: 'You already have an active study session.',
@@ -53,5 +72,8 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   NOT_IN_SESSION_ROOM: 'Go back to the room to resume.',
   SESSION_IN_OTHER_ROOM: 'End your study session in the other room first.',
   TASK_NOT_ATTACHABLE: 'That task cannot be attached to this session.',
+  VERSION_CONFLICT: 'This task was changed elsewhere. Showing the latest version.',
+  ID_CONFLICT: 'A different task with this id already exists.',
+  TASK_LIMIT_REACHED: 'You have reached the task limit.',
   INTERNAL: 'Something went wrong.',
 };

@@ -22,6 +22,7 @@ const OTHER_ROOM = '5e1f0d5a-0000-4000-8000-000000000002';
 const SID = 'aaaaaaaa-0000-4000-8000-000000000001';
 const OTHER_SID = 'aaaaaaaa-0000-4000-8000-0000000000ff';
 const NEW_SID = 'aaaaaaaa-0000-4000-8000-000000000002';
+const TASK = 'cccccccc-0000-4000-8000-000000000001';
 
 type Fixture = 'NO_SESSION' | 'STUDYING' | 'ON_BREAK' | 'BREAK_OVER';
 
@@ -30,6 +31,7 @@ const fixtures: Record<Fixture, SessionCore | null> = {
   STUDYING: {
     id: SID,
     roomId: ROOM,
+    taskId: null,
     startedAt: T - 60 * MIN,
     currentSegmentStartedAt: T - 10 * MIN,
     currentBreak: null,
@@ -38,6 +40,7 @@ const fixtures: Record<Fixture, SessionCore | null> = {
   ON_BREAK: {
     id: SID,
     roomId: ROOM,
+    taskId: null,
     startedAt: T - 60 * MIN,
     currentSegmentStartedAt: null,
     currentBreak: { durationMinutes: 10, startedAt: T - MIN, endsAt: T + 9 * MIN },
@@ -46,6 +49,7 @@ const fixtures: Record<Fixture, SessionCore | null> = {
   BREAK_OVER: {
     id: SID,
     roomId: ROOM,
+    taskId: null,
     startedAt: T - 60 * MIN,
     currentSegmentStartedAt: null,
     currentBreak: { durationMinutes: 5, startedAt: T - 10 * MIN, endsAt: T - 5 * MIN },
@@ -87,6 +91,11 @@ const variants = {
   stale_resume: { command: { type: 'RESUME', sessionId: OTHER_SID }, ctx: inRoom },
   stale_end: { command: { type: 'END', sessionId: OTHER_SID }, ctx: inRoom },
   move_to_other_room: { command: { type: 'MOVE_TO_ROOM', roomId: OTHER_ROOM }, ctx: inRoom },
+  set_task: { command: { type: 'SET_TASK', sessionId: SID, taskId: TASK }, ctx: notInRoom },
+  stale_set_task: {
+    command: { type: 'SET_TASK', sessionId: OTHER_SID, taskId: TASK },
+    ctx: inRoom,
+  },
 } satisfies Record<string, Variant>;
 
 type VariantName = keyof typeof variants;
@@ -119,6 +128,8 @@ const table: Record<Fixture, Record<VariantName, Expectation>> = {
     stale_resume: R('NO_ACTIVE_SESSION'),
     stale_end: R('NO_ACTIVE_SESSION'),
     move_to_other_room: R('NO_ACTIVE_SESSION'),
+    set_task: R('NO_ACTIVE_SESSION'),
+    stale_set_task: R('NO_ACTIVE_SESSION'),
   },
   STUDYING: {
     start_in_room: R('SESSION_ALREADY_ACTIVE'), // row 13
@@ -137,6 +148,8 @@ const table: Record<Fixture, Record<VariantName, Expectation>> = {
     stale_resume: R('STALE_SESSION'),
     stale_end: R('STALE_SESSION'),
     move_to_other_room: R('SESSION_IN_OTHER_ROOM'), // row 19
+    set_task: N('STUDYING'), // row 12,
+    stale_set_task: R('STALE_SESSION'),
   },
   ON_BREAK: {
     start_in_room: R('SESSION_ALREADY_ACTIVE'),
@@ -155,6 +168,8 @@ const table: Record<Fixture, Record<VariantName, Expectation>> = {
     stale_resume: R('STALE_SESSION'),
     stale_end: R('STALE_SESSION'),
     move_to_other_room: R('SESSION_IN_OTHER_ROOM'),
+    set_task: N('ON_BREAK'),
+    stale_set_task: R('STALE_SESSION'),
   },
   BREAK_OVER: {
     start_in_room: R('SESSION_ALREADY_ACTIVE'),
@@ -173,6 +188,8 @@ const table: Record<Fixture, Record<VariantName, Expectation>> = {
     stale_resume: R('STALE_SESSION'),
     stale_end: R('STALE_SESSION'),
     move_to_other_room: R('SESSION_IN_OTHER_ROOM'),
+    set_task: N('BREAK_OVER'),
+    stale_set_task: R('STALE_SESSION'),
   },
 };
 
@@ -186,7 +203,7 @@ describe('timer machine — exhaustive transition table (Phase 0 rows)', () => {
         expect(table[f][v], `${f} × ${v} has no expectation`).toBeDefined();
       }
     }
-    expect(fixtureNames.length * variantNames.length).toBe(4 * 23);
+    expect(fixtureNames.length * variantNames.length).toBe(4 * 25);
   });
 
   for (const f of fixtureNames) {

@@ -2,7 +2,7 @@
  * Per-socket token buckets (ARCHITECTURE §12.3, API_DESIGN §10). Rate limiting is about real
  * wall time, so it uses its own clock (not the domain clock that tests fast-forward).
  */
-export type RateBucket = 'timer' | 'room' | 'sync';
+export type RateBucket = 'timer' | 'task' | 'room' | 'sync';
 
 export interface BucketConfig {
   capacity: number;
@@ -13,6 +13,7 @@ export type RateLimitConfig = Record<RateBucket, BucketConfig>;
 
 export const DEFAULT_RATE_LIMITS: RateLimitConfig = {
   timer: { capacity: 30, perMs: 60_000 },
+  task: { capacity: 120, perMs: 60_000 },
   room: { capacity: 20, perMs: 60_000 },
   sync: { capacity: 30, perMs: 60_000 },
 };

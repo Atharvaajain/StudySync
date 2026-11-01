@@ -1,7 +1,7 @@
 /**
  * Realtime test harness (TESTING_STRATEGY §4, §5.6): the real server in-process on an
- * ephemeral port, a frozen ManualClock that only moves when advanced, and real
- * socket.io-client connections acting as browsers.
+ * ephemeral port, backed by the real PostgreSQL test database, a frozen ManualClock that only
+ * moves when advanced, and real socket.io-client connections authenticated with real JWTs.
  */
 import { randomUUID } from 'node:crypto';
 import { io as connectClient, type Socket } from 'socket.io-client';
@@ -17,18 +17,20 @@ import {
   type SessionStatePayload,
   type SessionSummaryDto,
 } from '@studysync/shared';
-import { loadEnv } from '../../src/config/env';
 import { ManualClock } from '../../src/lib/clock';
 import { createLogger } from '../../src/lib/logger';
+import { TokenService } from '../../src/modules/auth/tokens';
 import type { RateLimitConfig } from '../../src/realtime/rateLimiter';
 import { createStudySyncServer, type StudySyncServer } from '../../src/server';
+import { createUser, resetDb, testDb, testEnv } from './db';
 
 export const ROOM_ID = PROTOTYPE_ROOM.id;
 export const START = Date.parse('2026-11-01T10:00:00.000Z');
 export const MIN = 60_000;
 
-const NO_LIMITS: RateLimitConfig = {
+export const NO_LIMITS: RateLimitConfig = {
   timer: { capacity: 10_000, perMs: 1_000 },
+  task: { capacity: 10_000, perMs: 1_000 },
   room: { capacity: 10_000, perMs: 1_000 },
   sync: { capacity: 10_000, perMs: 1_000 },
 };
@@ -132,9 +134,9 @@ export class TestClient {
     return result;
   }
 
-  async start(): Promise<SessionDto> {
-    return this.ok(await this.call('start_study', { commandId: randomUUID(), roomId: ROOM_ID }))
-      .session;
+  /** Start Study in the prototype room (default) or solo (`null`). */
+  async start(roomId: string | null = ROOM_ID): Promise<SessionDto> {
+    return this.ok(await this.call('start_study', { commandId: randomUUID(), roomId })).session;
   }
 
   async takeBreak(sessionId: string, durationMinutes: BreakMinutes): Promise<SessionDto> {
@@ -180,25 +182,35 @@ export interface Harness {
   server: StudySyncServer;
   clock: ManualClock;
   url: string;
+  tokens: TokenService;
   /** Move the server clock forward and fire due deadlines (break-over pushes, display grace). */
   advance(ms: number): void;
-  connect(name: string, options?: { userId?: string }): Promise<TestClient>;
+  /** Creates a user (unless `userId` is given) and connects a socket with a real JWT. */
+  connect(name: string, options?: { userId?: string; timezone?: string }): Promise<TestClient>;
   /** Connect with arbitrary handshake auth; resolves with the connect_error message. */
   connectExpectingError(auth: unknown): Promise<string>;
+  /** A valid access token for `userId` (REST calls). */
+  tokenFor(userId: string): string;
   close(): Promise<void>;
 }
 
+/** Starts the server on a clean database. */
 export async function startHarness(
-  options: { rateLimits?: RateLimitConfig } = {},
+  options: { rateLimits?: RateLimitConfig; start?: number; accessTokenTtlSec?: number } = {},
 ): Promise<Harness> {
-  const clock = new ManualClock(START);
-  const env = loadEnv({ NODE_ENV: 'test', LOG_LEVEL: 'silent', PORT: '0' });
+  const db = testDb();
+  await resetDb(db);
+  const clock = new ManualClock(options.start ?? START);
+  // Long-lived tokens by default: timer tests fast-forward the clock by tens of minutes.
+  const env = testEnv({ ACCESS_TOKEN_TTL_SEC: String(options.accessTokenTtlSec ?? 86_400) });
   const server = createStudySyncServer({
     env,
     clock,
+    db,
     logger: createLogger('silent'),
     rateLimits: options.rateLimits ?? NO_LIMITS,
   });
+  const tokens = new TokenService(env, clock);
   const address = await server.listen(0, '127.0.0.1');
   const url = `http://127.0.0.1:${address.port}`;
   const clients: TestClient[] = [];
@@ -217,13 +229,15 @@ export async function startHarness(
     server,
     clock,
     url,
+    tokens,
     advance(ms) {
       clock.advance(ms);
       server.scheduler.runDue();
     },
     async connect(name, opts = {}) {
-      const userId = opts.userId ?? randomUUID();
-      const socket = open({ userId, name });
+      const userId =
+        opts.userId ?? (await createUser(db, { name, timezone: opts.timezone ?? 'UTC' })).id;
+      const socket = open({ token: tokens.signAccess(userId).token });
       const client = new TestClient(socket, userId, name);
       await new Promise<void>((resolve, reject) => {
         socket.once('connect', () => resolve());
@@ -248,6 +262,9 @@ export async function startHarness(
         });
         socket.connect();
       });
+    },
+    tokenFor(userId) {
+      return tokens.signAccess(userId).token;
     },
     async close() {
       await Promise.all(clients.map((c) => c.disconnect()));

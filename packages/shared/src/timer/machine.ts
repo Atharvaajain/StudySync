@@ -6,8 +6,8 @@
  *   the break's `endsAt`, then BREAK_OVER (§13.2).
  * - System events can never enter STUDYING; only `start_study` / `resume_study` (user) can (R5).
  *
- * Phase 0 implements transition-table rows 1–6, 11 and 13–21. Rows 7–10 (idle / disconnect
- * auto-save, liveness) arrive in Phase 2; row 12 (attach task) in Phase 1.
+ * Implemented: transition-table rows 1–6 and 11–21. Rows 7–10 (idle / disconnect auto-save,
+ * liveness) arrive in Phase 2.
  */
 import { isBreakMinutes, minutesToMs, type BreakMinutes } from '../constants';
 import type { Phase } from '../dto';
@@ -28,6 +28,8 @@ export interface BreakCore {
 export interface SessionCore {
   readonly id: string;
   readonly roomId: string | null;
+  /** The attached "what am I working on" task (F-29); attachability is checked by the service. */
+  readonly taskId: string | null;
   readonly startedAt: EpochMs;
   /** Non-null iff STUDYING. */
   readonly currentSegmentStartedAt: EpochMs | null;
@@ -37,11 +39,12 @@ export interface SessionCore {
 }
 
 export type TimerCommand =
-  | { readonly type: 'START'; readonly roomId: string | null }
+  | { readonly type: 'START'; readonly roomId: string | null; readonly taskId?: string | null }
   | { readonly type: 'TAKE_BREAK'; readonly sessionId: string; readonly durationMinutes: number }
   | { readonly type: 'RESUME'; readonly sessionId: string }
   | { readonly type: 'END'; readonly sessionId: string }
-  | { readonly type: 'MOVE_TO_ROOM'; readonly roomId: string };
+  | { readonly type: 'MOVE_TO_ROOM'; readonly roomId: string }
+  | { readonly type: 'SET_TASK'; readonly sessionId: string; readonly taskId: string | null };
 
 export interface DecideContext {
   readonly now: EpochMs;
@@ -57,7 +60,12 @@ export type SegmentEndReason = 'BREAK' | 'ENDED_BY_USER' | 'ROOM_MOVE';
 export type BreakCloseReason = 'RESUMED' | 'ENDED_BY_USER';
 
 export type Effect =
-  | { readonly type: 'CREATE_SESSION'; readonly at: EpochMs; readonly roomId: string | null }
+  | {
+      readonly type: 'CREATE_SESSION';
+      readonly at: EpochMs;
+      readonly roomId: string | null;
+      readonly taskId: string | null;
+    }
   | { readonly type: 'OPEN_SEGMENT'; readonly at: EpochMs; readonly roomId: string | null }
   | { readonly type: 'CLOSE_SEGMENT'; readonly at: EpochMs; readonly reason: SegmentEndReason }
   | {
@@ -68,9 +76,11 @@ export type Effect =
     }
   | { readonly type: 'CLOSE_BREAK'; readonly at: EpochMs; readonly reason: BreakCloseReason }
   | { readonly type: 'SET_ROOM'; readonly roomId: string }
+  | { readonly type: 'SET_TASK'; readonly taskId: string | null }
   | { readonly type: 'END_SESSION'; readonly at: EpochMs; readonly reason: 'USER' };
 
-export type TimerEventType = 'STARTED' | 'BREAK_TAKEN' | 'RESUMED' | 'ENDED' | 'MOVED_TO_ROOM';
+export type TimerEventType =
+  'STARTED' | 'BREAK_TAKEN' | 'RESUMED' | 'ENDED' | 'MOVED_TO_ROOM' | 'TASK_SET';
 
 export interface TimerEvent {
   readonly type: TimerEventType;
@@ -130,9 +140,11 @@ export function decide(
       } else if (ctx.userPresenceRoomId !== null) {
         return reject('MUST_START_IN_CURRENT_ROOM');
       }
+      const taskId = command.taskId ?? null;
       const next: SessionCore = {
         id: ctx.newSessionId,
         roomId: command.roomId,
+        taskId,
         startedAt: now,
         currentSegmentStartedAt: now,
         currentBreak: null,
@@ -142,7 +154,7 @@ export function decide(
         ok: true,
         next,
         effects: [
-          { type: 'CREATE_SESSION', at: now, roomId: command.roomId },
+          { type: 'CREATE_SESSION', at: now, roomId: command.roomId, taskId },
           { type: 'OPEN_SEGMENT', at: now, roomId: command.roomId },
         ],
         event: { type: 'STARTED', actor: 'USER', fromPhase: from, toPhase: 'STUDYING', at: now },
@@ -251,6 +263,18 @@ export function decide(
         },
         effects,
         event: { type: 'MOVED_TO_ROOM', actor: 'USER', fromPhase: from, toPhase: from, at: now },
+      };
+    }
+
+    case 'SET_TASK': {
+      if (session === null) return reject('NO_ACTIVE_SESSION'); // row 17
+      if (command.sessionId !== session.id) return reject('STALE_SESSION'); // row 18
+      // Row 12: attach or clear the task in any phase; the phase never changes.
+      return {
+        ok: true,
+        next: { ...session, taskId: command.taskId, version: session.version + 1 },
+        effects: [{ type: 'SET_TASK', taskId: command.taskId }],
+        event: { type: 'TASK_SET', actor: 'USER', fromPhase: from, toPhase: from, at: now },
       };
     }
   }

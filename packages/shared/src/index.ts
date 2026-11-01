@@ -6,3 +6,4 @@ export * from './dto';
 export * from './realtime/events';
 export * from './timer/machine';
 export * from './timer/display';
+export * from './time';
