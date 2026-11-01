@@ -5,11 +5,12 @@ Read this first, every session. It is the standing brief for Claude (and any eng
 ## Project status
 
 **Architecture v1.1 APPROVED (with clarifications, ARCHITECTURE §5).** Implemented so far:
-Phase 0 (spike, `feature/phase-0-realtime-prototype`), Phase 1 (solo core,
-`feature/phase-1-core-app`) and Phase 2 (rooms, `feature/phase-2-rooms`). Phase 2 is awaiting the
-product owner's approval; **do not start Phase 3 until it is given.** Follow DEVELOPMENT_ROADMAP.md
-step by step (0 Spike → 1 Solo → 2 Rooms → 3 Stats → 4 Polish → 5 Pre-launch & release) and stop
-for approval at the end of every phase. Test reports: `docs/phase-<n>/TEST_REPORT.md`.
+Phase 0 (spike), Phase 1 (solo core), Phase 2 (rooms) and the MVP finalization
+(`feature/phase-3-finalization`: charts, heatmap, break notification, UX pass, security review,
+production config, deployment preparation). **Not deployed; not launch-ready** until password
+reset and account deletion (D-4) exist. Awaiting the product owner's approval — do not start
+new work until it is given. Reports: `docs/phase-<n>/TEST_REPORT.md`; deployment:
+`docs/DEPLOYMENT.md`.
 
 ## Engineering governance (standing rules from the product owner — apply for the whole project)
 
@@ -170,7 +171,8 @@ tools locally.
 `scripts/dev-db.sh` (start PostgreSQL, create the dev / test / e2e databases) · `npm run dev` ·
 `build` · `start` · `lint` · `typecheck` · `format` / `format:check` · `test` (all Vitest
 projects) · `test:unit` · `test:integration` (PostgreSQL `studysync_test`) · `test:e2e`
-(Playwright, `studysync_e2e`) · `db:migrate` · `db:reset` · `db:seed`. Local config:
+(Playwright, `studysync_e2e`) · `db:migrate` · `db:reset` · `db:seed` · `db:audit` ·
+`smoke -- <url>`. Local config:
 `cp .env.example apps/server/.env`.
 
 ## Workflow

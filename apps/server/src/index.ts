@@ -2,9 +2,15 @@ import { existsSync } from 'node:fs';
 import { loadEnv } from './config/env';
 import { createStudySyncServer } from './server';
 
-// Local development: apps/server/.env (gitignored; see .env.example). Real env vars win.
+// Local development only: apps/server/.env (gitignored; see .env.example). Real env vars win.
+// In production every setting comes from the host's environment, never from a stray file.
 const envFile = new URL('../.env', import.meta.url);
-if (existsSync(envFile)) process.loadEnvFile(envFile);
+if (process.env.NODE_ENV === 'production' && existsSync(envFile)) {
+  // Prisma Client also auto-loads this file at import time, so it could silently override the
+  // host's settings. Production configuration must come only from the environment.
+  throw new Error('Refusing to start in production with apps/server/.env present: delete it.');
+}
+if (process.env.NODE_ENV !== 'production' && existsSync(envFile)) process.loadEnvFile(envFile);
 
 const env = loadEnv();
 const server = createStudySyncServer({ env });

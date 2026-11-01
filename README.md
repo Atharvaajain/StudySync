@@ -6,12 +6,14 @@ status but studies at their own pace.
 
 > _Your study time is always yours. Rooms give presence and shared tasks — never a shared timer._
 
-**Status: Phase 2 — rooms and real-time synchronization** (branch `feature/phase-2-rooms`).
-On top of Phase 1 (accounts, solo timer, tasks, totals, history, streak): rooms with codes, My
-Rooms, live member statuses, shared room tasks, Today in this room, moving a solo session into a
-room without resetting it, the 2-minute disconnect grace and the 30-minute idle auto-save — all
-restart-safe. Test reports: [Phase 2](./docs/phase-2/TEST_REPORT.md) ·
-[Phase 1](./docs/phase-1/TEST_REPORT.md) · [Phase 0](./docs/phase-0/TEST_REPORT.md).
+**Status: MVP finalization** (branch `feature/phase-3-finalization`). Everything from Phases 0–2
+(accounts, solo timer, rooms, live statuses, room tasks, auto-save, restart safety) plus weekly /
+monthly charts, an activity heatmap, a break-end browser notification, a responsive UI down to
+360 px, clearer loading and error states, production configuration and deployment preparation.
+**Not deployed yet, and not ready for a public launch:** password reset and account deletion
+(decision D-4) are still missing. Reports: [MVP finalization](./docs/phase-3/TEST_REPORT.md) ·
+[Phase 2](./docs/phase-2/TEST_REPORT.md) · [Phase 1](./docs/phase-1/TEST_REPORT.md) ·
+[Phase 0](./docs/phase-0/TEST_REPORT.md) · **[Deployment guide](./docs/DEPLOYMENT.md)**.
 
 ---
 
@@ -64,7 +66,10 @@ of the same profile are the same user — which is how "two tabs can't create tw
 tested. With the seed, the demo users are already members of **DSA Night Study** (`DSA7K2`). The dev container is not reachable
 from your own computer, so demos are provided as screenshots and E2E videos.
 
-### Production-style build
+### Production build and deployment
+
+See the **[deployment guide](./docs/DEPLOYMENT.md)** (Neon + Render, optionally Vercel). To
+rehearse locally:
 
 ```bash
 npm run build
@@ -74,8 +79,9 @@ npm run build
 cd apps/server && STATIC_DIR=../web/dist node dist/index.js
 ```
 
-The server then serves the built web app and Socket.IO on one origin (port 4000).
-`NODE_ENV=production` is deliberately **refused** until the pre-launch phase (Phase 5).
+The server then serves the built web app and Socket.IO on one origin (port 4000). With
+`NODE_ENV=production` it requires a secure configuration (`deploy/production.env.example`).
+Check any running deployment with `npm run smoke -- <url>`.
 
 ---
 
@@ -96,6 +102,8 @@ The server then serves the built web app and Socket.IO on one origin (port 4000)
 | `npm run test:unit`          | Timer core, web and server unit tests (no database)                                 |
 | `npm run test:integration`   | PostgreSQL integration + realtime suites (`studysync_test`, migrated automatically) |
 | `npm run test:e2e`           | Builds the web app, then runs Playwright against the real server + `studysync_e2e`  |
+| `npm run smoke -- <url>`     | Post-deploy smoke test (health, headers, auth cookie, sockets, a study session)     |
+| `npm run db:audit`           | DATABASE_DESIGN §8 invariant audit against `DATABASE_URL` (nightly in production)   |
 | `npm run test:all`           | typecheck + lint + all tests + E2E                                                  |
 
 Useful variables: `FC_RUNS=50000 npm test` (more property-test cases),
@@ -114,6 +122,8 @@ Useful variables: `FC_RUNS=50000 npm test` (more property-test cases),
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Accounts and profile | Register (timezone detected), login, logout, rotating refresh cookie with reuse detection, CSRF header, rate limits; name and timezone in Settings                        |
 | Solo timer           | Start · Take Break (5/10/15/30 only) · Break Over · manual Resume · End Study, refresh-proof, with an attached task                                                       |
+| Charts and heatmap   | Weekly / monthly Solo-vs-Rooms bars and a weekday × hour heatmap on History, each with a table view                                                                       |
+| Notifications        | Browser notification when a break ends (permission asked on the break click); it never resumes the timer                                                                  |
 | Recording and stats  | Server-stamped segments (each with its timezone snapshot), breaks never counted; summary; TODAY Solo/Rooms/Total; per-day totals split at local midnight; history; streak |
 | Personal tasks       | Add, edit, complete, delete; live across your tabs                                                                                                                        |
 | Rooms                | Create (unique 6-character code), join by code or `/join/CODE` link, My Rooms, leave and rejoin; membership is permanent (D-2); at most 50 members (D-3)                  |
@@ -122,9 +132,9 @@ Useful variables: `FC_RUNS=50000 npm test` (more property-test cases),
 | Auto-save            | Disconnect grace (2 min, solo vs room liveness per ARCHITECTURE §11.3) and idle timeout (30 min in Break Over), stamped at the deadline; "session saved" notice           |
 | Restart safety       | Deadlines are data: a sweeper (every 5 s and at boot) with a liveness lease applies them after a crash or restart exactly as if processed on time                         |
 
-**Not built yet** (later phases, per the roadmap): weekly/monthly charts and room history
-(Phase 3–4), polish such as notifications (Phase 4), password reset and account deletion
-(Phase 5). Never built: shared timers, chat, video, voice, leaderboards.
+**Not built yet:** password reset and account deletion (D-4, required before a public launch),
+the room history page, notification sound. Never built: shared timers, chat, video, voice,
+leaderboards.
 
 ---
 
@@ -159,7 +169,8 @@ apps/server       Express 5 + Socket.IO + Prisma 6 (PostgreSQL 16)
   src/realtime/     Socket.IO gateway (JWT handshake, rate limits, per-user queue, emit after commit)
 apps/web          React 19 + Vite + Tailwind 4 + React Router: renders server timestamps only
 e2e               Playwright: Phase 0 two-browser suite, Phase 1 flows, Phase 2 three-user rooms
-docs/phase-0|1|2  Test reports and screenshots
+docs/phase-0…3    Test reports and screenshots · docs/DEPLOYMENT.md deployment guide
+deploy/           Production env template, Vercel rewrite example (render.yaml at the root)
 scripts/dev-db.sh Starts PostgreSQL and creates the dev / test / e2e databases (UTC)
 ```
 

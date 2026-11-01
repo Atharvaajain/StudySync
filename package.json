@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "StudySync — independent study timers, shared rooms.",
+  "description": "StudySync \u2014 independent study timers, shared rooms.",
   "workspaces": [
     "packages/shared",
     "apps/server",
@@ -28,7 +28,9 @@
     "test:unit": "vitest run --project shared --project web-unit --project server-unit",
     "test:integration": "vitest run --project server-db",
     "test:e2e": "npm run build -w @studysync/web && playwright test -c e2e/playwright.config.ts",
-    "test:all": "npm run typecheck && npm run lint && npm test && npm run test:e2e"
+    "test:all": "npm run typecheck && npm run lint && npm test && npm run test:e2e",
+    "smoke": "node scripts/smoke.mjs",
+    "db:audit": "npm run db:audit -w @studysync/server"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

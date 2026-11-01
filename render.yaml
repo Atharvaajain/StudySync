@@ -1,0 +1,32 @@
+# Render Blueprint — one web service: API + Socket.IO + the built web app on ONE origin
+# (DEVELOPMENT_ROADMAP 5.6, "same-origin web + API"). Database: Neon (DATABASE_URL).
+# Not yet verified on Render: see docs/DEPLOYMENT.md before using it.
+services:
+  - type: web
+    name: studysync
+    runtime: node
+    # One instance only: presence, rate limits and the sweeper's lease are per process (§22).
+    numInstances: 1
+    buildCommand: npm ci --include=dev && npm run build
+    # Applies committed migrations only (never resets). Needs a plan with pre-deploy commands;
+    # otherwise prefix the start command with `npm run db:deploy -w @studysync/server && `.
+    preDeployCommand: npm run db:deploy -w @studysync/server
+    startCommand: node apps/server/dist/index.js
+    healthCheckPath: /api/v1/health/ready
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: '22'
+      - key: HOST
+        value: 0.0.0.0
+      - key: STATIC_DIR
+        value: apps/web/dist
+      - key: TRUST_PROXY
+        value: '1'
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_URL
+        sync: false # paste the Neon connection string (see docs/DEPLOYMENT.md)
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
