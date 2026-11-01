@@ -9,7 +9,7 @@
 import type { MemberStatusDto, RoomStatus } from '@studysync/shared';
 import { toIso } from '../../lib/time';
 import type { UserDirectory } from '../users/userDirectory';
-import type { RoomRegistry } from '../rooms/roomRegistry';
+import type { RoomService } from '../rooms/roomService';
 import type { SessionService } from '../sessions/sessionService';
 import type { PresenceStore } from './presenceStore';
 
@@ -17,7 +17,7 @@ export interface MemberStatusDeps {
   presence: PresenceStore;
   sessions: SessionService;
   users: UserDirectory;
-  rooms: RoomRegistry;
+  rooms: RoomService;
 }
 
 const key = (roomId: string, userId: string): string => `${roomId}:${userId}`;

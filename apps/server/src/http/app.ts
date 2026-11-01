@@ -19,6 +19,10 @@ import { toIso } from '../lib/time';
 import { authRoutes } from '../modules/auth/auth.routes';
 import type { AuthService } from '../modules/auth/authService';
 import type { TokenService } from '../modules/auth/tokens';
+import type { MemberStatusService } from '../modules/presence/memberStatusService';
+import { roomsRoutes } from '../modules/rooms/rooms.routes';
+import type { RoomService } from '../modules/rooms/roomService';
+import type { Maintenance } from '../modules/sessions/maintenance';
 import { sessionsRoutes } from '../modules/sessions/sessions.routes';
 import type { SessionService } from '../modules/sessions/sessionService';
 import { statsRoutes } from '../modules/stats/stats.routes';
@@ -42,6 +46,9 @@ export interface HttpAppDeps {
   tasks: TaskService;
   sessions: SessionService;
   stats: StatsService;
+  rooms: RoomService;
+  memberStatus: MemberStatusService;
+  maintenance: Maintenance;
   rateLimits: HttpRateLimits;
 }
 
@@ -89,7 +96,7 @@ export function createHttpApp(deps: HttpAppDeps): express.Express {
   if (env.ENABLE_TEST_CLOCK) {
     if (!isAdjustable(clock)) throw new Error('ENABLE_TEST_CLOCK requires an adjustable clock');
     // TEST ONLY: fast-forward the server clock and fire due deadlines (E2E breaks of 5–30 min).
-    app.post('/__test__/clock', (req, res) => {
+    app.post('/__test__/clock', async (req, res) => {
       const parsed = testClockSchema.safeParse(req.body);
       if (!parsed.success) {
         res
@@ -97,8 +104,14 @@ export function createHttpApp(deps: HttpAppDeps): express.Express {
           .json({ error: { code: 'VALIDATION_ERROR', message: 'advanceMs required' } });
         return;
       }
-      clock.advance(parsed.data.advanceMs);
-      scheduler.runDue();
+      const { advanceMs } = parsed.data;
+      // Live users' leases are refreshed inside the same exclusive section as the jump, so the
+      // sweeper never mistakes a clock jump for a crashed instance.
+      await deps.maintenance.exclusive(async () => {
+        clock.advance(advanceMs);
+        await deps.maintenance.refreshLease();
+        scheduler.runDue();
+      });
       res.json({ now: toIso(clock.now()) });
     });
     logger.warn('Test clock endpoint enabled (POST /__test__/clock) — test mode only');
@@ -117,6 +130,19 @@ export function createHttpApp(deps: HttpAppDeps): express.Express {
     sessionsRoutes({ sessions: deps.sessions, queue: deps.queue, clock }),
   );
   app.use('/api/v1/stats', ...authed, statsRoutes(deps.stats));
+  app.use(
+    '/api/v1/rooms',
+    ...authed,
+    roomsRoutes({
+      rooms: deps.rooms,
+      sessions: deps.sessions,
+      tasks: deps.tasks,
+      memberStatus: deps.memberStatus,
+      queue: deps.queue,
+      clock,
+      limits: deps.rateLimits,
+    }),
+  );
 
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: ERROR_MESSAGES.NOT_FOUND } });

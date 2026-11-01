@@ -19,7 +19,8 @@ export function sessionsRoutes(deps: {
   router.get('/current', async (_req, res) => {
     const userId = userIdOf(res);
     const session = await queue.run(userId, () => sessions.refresh(userId));
-    res.json({ session, lastAutoSaved: null, serverNow: toIso(clock.now()) });
+    const { lastAutoSaved } = sessions.statePayload(userId, 'SYNC');
+    res.json({ session, lastAutoSaved, serverNow: toIso(clock.now()) });
   });
 
   router.get('/', async (req, res) => {
@@ -30,6 +31,14 @@ export function sessionsRoutes(deps: {
   router.get('/:sessionId/summary', async (req, res) => {
     const sessionId = parseOrThrow(uuidSchema, req.params.sessionId);
     res.json(await sessions.summaryFor(userIdOf(res), sessionId));
+  });
+
+  // Acknowledge the "session saved" notice (owner only, idempotent).
+  router.post('/:sessionId/summary-seen', async (req, res) => {
+    const userId = userIdOf(res);
+    const sessionId = parseOrThrow(uuidSchema, req.params.sessionId);
+    await queue.run(userId, () => sessions.markSummarySeen(userId, sessionId));
+    res.status(204).end();
   });
 
   return router;

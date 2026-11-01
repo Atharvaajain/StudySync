@@ -20,6 +20,11 @@ export class KeyedQueue {
     return result;
   }
 
+  /** Resolves when everything queued so far has finished (shutdown, tests). */
+  async drain(): Promise<void> {
+    while (this.tails.size > 0) await Promise.all([...this.tails.values()]);
+  }
+
   /** Number of keys with work queued (diagnostics / tests). */
   get size(): number {
     return this.tails.size;

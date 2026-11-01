@@ -4,13 +4,14 @@
  * defense: any disagreement between the machine and the rows aborts the whole transaction.
  */
 import {
+  LEASE_STALE_MS,
   isBreakMinutes,
+  type AutoSavedNotice,
   type Effect,
   type SessionCore,
   type SessionHistoryItem,
   type SessionSummaryDto,
   type TimerEvent,
-  type TimerEventType,
 } from '@studysync/shared';
 import { Prisma, msOf, msOrNull, toDate, toDateOrNull, type Db, type Tx } from '../../lib/db';
 import { IntegrityError } from '../../lib/errors';
@@ -19,6 +20,8 @@ import { toIso, toIsoOrNull } from '../../lib/time';
 /** The caller's ACTIVE session plus what its DTO needs. */
 export interface SessionView {
   core: SessionCore;
+  /** Liveness lease (ARCHITECTURE §13.6). */
+  lastSeenAt: number;
   studyMsClosed: number;
   roomName: string | null;
   task: { id: string; title: string } | null;
@@ -63,8 +66,10 @@ export async function loadActiveView(
               endsAt: msOf(open.endsAt),
             }
           : null,
+      disconnectedAt: msOrNull(s.disconnectedAt),
       version: s.version,
     },
+    lastSeenAt: msOf(s.lastSeenAt),
     studyMsClosed: s.segments.reduce((sum, g) => sum + (msOf(g.endedAt!) - msOf(g.startedAt)), 0),
     roomName: s.room?.name ?? null,
     task: s.task,
@@ -174,6 +179,7 @@ export async function applyTransition(tx: Tx, t: TransitionWrite): Promise<strin
       case 'CREATE_SESSION':
       case 'SET_ROOM':
       case 'SET_TASK':
+      case 'SET_DISCONNECTED':
       case 'END_SESSION':
         break; // session-row columns, written once below
     }
@@ -182,12 +188,16 @@ export async function applyTransition(tx: Tx, t: TransitionWrite): Promise<strin
   if (!create) {
     if (!core) throw new IntegrityError('session_exists', 'transition needs an existing session');
     const end = effects.find((e) => e.type === 'END_SESSION');
+    // Every accepted user command and every reconnect is a sign of life (§13.4).
+    const seen = event.actor === 'USER' || event.type === 'RECONNECTED';
     const data: Prisma.StudySessionUncheckedUpdateManyInput = next
       ? {
           roomId: next.roomId,
           taskId: next.taskId,
           currentSegmentStartedAt: toDateOrNull(next.currentSegmentStartedAt),
           breakEndsAt: toDateOrNull(next.currentBreak?.endsAt ?? null),
+          disconnectedAt: toDateOrNull(next.disconnectedAt ?? null),
+          ...(seen ? { lastSeenAt: toDate(event.at) } : {}),
           version: next.version,
         }
       : end
@@ -245,16 +255,6 @@ export async function isTaskAttachable(
   if (task.roomId === null) return task.userId === userId;
   return sessionRoomId !== null && task.roomId === sessionRoomId;
 }
-
-const EVENT_TYPES: ReadonlySet<string> = new Set<TimerEventType>([
-  'STARTED',
-  'BREAK_TAKEN',
-  'RESUMED',
-  'ENDED',
-  'MOVED_TO_ROOM',
-  'TASK_SET',
-]);
-export const isUserEventType = (type: string): type is TimerEventType => EVENT_TYPES.has(type);
 
 // ───────────── reads (DATABASE_DESIGN §6.4, §6.10) ─────────────
 
@@ -362,4 +362,98 @@ export async function sessionHistory(
     roomName: r.room_name,
     studiedMs: Number(r.studied_ms),
   }));
+}
+
+// ───────────── liveness lease, sweeper, auto-saved notice (§6.7, §6.8, §13.11) ─────────────
+
+/** Like lockUser, but never waits: the sweeper skips users a command is working on (§13.8). */
+export async function tryLockUser(tx: Tx, userId: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<{ locked: boolean }[]>`
+    SELECT pg_try_advisory_xact_lock(hashtextextended(${userId}::text, 0)) AS locked`;
+  return rows[0]?.locked === true;
+}
+
+/**
+ * §6.8: refresh `last_seen_at` for the sessions that are live on this instance — solo
+ * sessions of users with any socket, room sessions of users present in that room (D-7).
+ */
+export async function refreshLease(
+  db: Db,
+  now: number,
+  soloUsers: string[],
+  roomPairs: { userId: string; roomId: string }[],
+): Promise<number> {
+  if (soloUsers.length === 0 && roomPairs.length === 0) return 0;
+  const at = toDate(now);
+  return db.$executeRaw`
+    UPDATE study_sessions s SET last_seen_at = ${at}::timestamptz
+    WHERE s.status = 'ACTIVE' AND s.disconnected_at IS NULL
+      AND (   (s.room_id IS NULL     AND s.user_id = ANY(${soloUsers}::uuid[]))
+           OR (s.room_id IS NOT NULL AND (s.user_id, s.room_id) IN (
+                 SELECT p.u, p.r FROM unnest(${roomPairs.map((p) => p.userId)}::uuid[],
+                                             ${roomPairs.map((p) => p.roomId)}::uuid[]) AS p(u, r))))`;
+}
+
+/** §6.7: users whose active session has a due deadline or a stale lease. */
+export async function sweepCandidates(db: Db, now: number): Promise<string[]> {
+  const at = toDate(now);
+  const rows = await db.$queryRaw<{ user_id: string }[]>`
+    SELECT user_id FROM study_sessions
+    WHERE status = 'ACTIVE' AND (
+           (disconnected_at IS NOT NULL AND disconnected_at <= ${at}::timestamptz - interval '2 minutes')
+        OR (current_segment_started_at IS NULL AND break_ends_at <= ${at}::timestamptz - interval '30 minutes')
+        OR (disconnected_at IS NULL AND last_seen_at < ${at}::timestamptz - ${LEASE_STALE_MS} * interval '1 millisecond'))
+    LIMIT 200`;
+  return rows.map((r) => r.user_id);
+}
+
+/** The newest system-ended session the user hasn't acknowledged (drives the saved notice). */
+export async function latestUnseenAutoSave(
+  db: Db | Tx,
+  userId: string,
+): Promise<AutoSavedNotice | null> {
+  const rows = await db.$queryRaw<
+    {
+      id: string;
+      end_reason: 'DISCONNECTED' | 'IDLE_TIMEOUT';
+      ended_at: Date;
+      studied_ms: bigint;
+    }[]
+  >`
+    SELECT ss.id, ss.end_reason::text AS end_reason, ss.ended_at,
+           (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM g.ended_at - g.started_at) * 1000), 0)::bigint
+              FROM study_segments g WHERE g.session_id = ss.id) AS studied_ms
+    FROM study_sessions ss
+    WHERE ss.user_id = ${userId}::uuid AND ss.status = 'ENDED'
+      AND ss.end_reason IN ('DISCONNECTED', 'IDLE_TIMEOUT') AND ss.summary_seen_at IS NULL
+    ORDER BY ss.ended_at DESC LIMIT 1`;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    sessionId: row.id,
+    endReason: row.end_reason,
+    endedAt: toIso(msOf(row.ended_at)),
+    studiedMs: Number(row.studied_ms),
+  };
+}
+
+/** POST /sessions/:id/summary-seen. Owner only; idempotent. Returns false if not found. */
+export async function markSummarySeen(
+  db: Db,
+  userId: string,
+  sessionId: string,
+  now: number,
+): Promise<boolean> {
+  const session = await db.studySession.findFirst({
+    where: { id: sessionId, userId },
+    select: { id: true, summarySeenAt: true },
+  });
+  if (!session) return false;
+  if (session.summarySeenAt === null) {
+    await db.studySession.update({
+      where: { id: sessionId },
+      data: { summarySeenAt: toDate(now) },
+    });
+  }
+  return true;
 }

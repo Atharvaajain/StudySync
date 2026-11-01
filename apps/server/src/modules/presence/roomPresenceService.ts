@@ -3,8 +3,8 @@
  * (I-19: someone who leaves shows their last status with "reconnecting" for up to 2 minutes,
  * then ⚫ Offline).
  *
- * Scope until Phase 2: session auto-save after a disconnect (R9) arrives in Phase 2. Until then
- * a disconnect only affects what the room displays; it never touches anyone's timer.
+ * Display grace is separate from session grace (§11.3): this module only decides what the
+ * room shows. Whether the user's own session is live is evaluated by SessionService.
  */
 import { DISCONNECT_GRACE_MS, type JoinRoomResult } from '@studysync/shared';
 import type { DomainEvents } from '../../events/domainEvents';
@@ -13,8 +13,9 @@ import { AppError } from '../../lib/errors';
 import type { KeyedQueue } from '../../lib/keyedQueue';
 import type { DeadlineScheduler } from '../../lib/scheduler';
 import { toIso } from '../../lib/time';
-import type { RoomRegistry } from '../rooms/roomRegistry';
+import type { RoomService } from '../rooms/roomService';
 import type { SessionService } from '../sessions/sessionService';
+import type { TaskService } from '../tasks/taskService';
 import type { MemberStatusService } from './memberStatusService';
 import type { PresenceStore } from './presenceStore';
 
@@ -22,7 +23,8 @@ export interface RoomPresenceDeps {
   presence: PresenceStore;
   memberStatus: MemberStatusService;
   sessions: SessionService;
-  rooms: RoomRegistry;
+  rooms: RoomService;
+  tasks: TaskService;
   scheduler: DeadlineScheduler;
   events: DomainEvents;
   queue: KeyedQueue;
@@ -47,7 +49,7 @@ export class RoomPresenceService {
     if (active?.roomId && active.roomId !== roomId) {
       throw new AppError('SESSION_IN_OTHER_ROOM', { session: active, roomName: active.roomName });
     }
-    // Membership (permanent, D-2). PHASE 1: only the prototype room admits new members.
+    // Membership is required (NOT_FOUND otherwise, no existence leak); records the visit.
     await rooms.enter(roomId, userId);
 
     const wasPresent = presence.isPresent(roomId, userId);
@@ -81,8 +83,8 @@ export class RoomPresenceService {
       result: {
         room: await rooms.roomDto(roomId, userId),
         members: await memberStatus.members(roomId),
-        tasks: [],
-        today: null,
+        tasks: await this.deps.tasks.listRoom(roomId),
+        today: await rooms.today(roomId),
         session: sessions.activeSessionDto(userId),
         serverNow: toIso(clock.now()),
       },

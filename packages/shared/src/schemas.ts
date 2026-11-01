@@ -63,6 +63,21 @@ export const updateProfileSchema = z
 
 // ───────────── rooms & timer (API_DESIGN §7) ─────────────
 
+export const roomNameSchema = z.string().trim().min(1).max(60);
+export const createRoomSchema = z.strictObject({ name: roomNameSchema });
+/**
+ * Join by code: case-insensitive input, normalized to upper case. The format itself is checked
+ * by the service so that every bad code gets the same `INVALID_CODE` answer (E-24).
+ */
+export const joinByCodeSchema = z.strictObject({
+  code: z
+    .string()
+    .trim()
+    .max(32)
+    .transform((c) => c.toUpperCase()),
+});
+export const roomTasksQuerySchema = z.strictObject({ status: z.enum(['TODO', 'DONE']).optional() });
+
 export const joinRoomSchema = z.strictObject({ roomId: uuidSchema });
 export const leaveRoomSchema = z.strictObject({ roomId: uuidSchema });
 
@@ -135,6 +150,8 @@ export const historyQuerySchema = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
+export type CreateRoomPayload = z.input<typeof createRoomSchema>;
+export type JoinByCodePayload = z.input<typeof joinByCodeSchema>;
 export type RegisterPayload = z.input<typeof registerSchema>;
 export type LoginPayload = z.input<typeof loginSchema>;
 export type UpdateProfilePayload = z.input<typeof updateProfileSchema>;

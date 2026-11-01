@@ -1,8 +1,4 @@
-/**
- * Wire DTOs (API_DESIGN §2). Instants are ISO-8601 UTC strings with `Z`; durations are ms.
- * Fields that belong to later phases are present with their documented "empty" value
- * (e.g. `disconnectedAt: null` until auto-save arrives in Phase 2).
- */
+/** Wire DTOs (API_DESIGN §2). Instants are ISO-8601 UTC strings with `Z`; durations are ms. */
 import type { BreakMinutes } from './constants';
 
 export type Instant = string;
@@ -64,7 +60,7 @@ export interface RoomDto {
   id: string;
   name: string;
   code: string;
-  createdBy: UserRef | null;
+  createdBy: UserRef;
   isCreator: boolean;
   memberCount: number;
   createdAt: Instant;
@@ -90,13 +86,24 @@ export interface SessionSummaryDto {
   completedTasks: { id: string; title: string }[];
 }
 
+/** My Rooms (F-19): every room I am a member of, most recently visited first. */
+export interface MyRoomDto extends RoomDto {
+  joinedAt: Instant;
+  lastVisitedAt: Instant | null;
+}
+
+/** "Today in this room" (F-23, I-09): each member's own local today, in this room only. */
+export interface TodayInRoomDto {
+  roomId: string;
+  serverNow: Instant;
+  members: { user: UserRef; todayMs: number; studyingSince: Instant | null }[];
+}
+
 export interface JoinRoomResult {
   room: RoomDto;
   members: MemberStatusDto[];
-  /** Room tasks arrive in Phase 2; always empty until then. */
-  tasks: never[];
-  /** "Today in this room" arrives in Phase 2; always null until then. */
-  today: null;
+  tasks: TaskDto[];
+  today: TodayInRoomDto;
   session: SessionDto | null;
   serverNow: Instant;
 }

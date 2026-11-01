@@ -27,13 +27,17 @@ afterEach(async () => {
 });
 
 describe('AC-1 two browsers join the same room', () => {
-  it('both are listed with live statuses; the room is the hardcoded DSA Night Study', async () => {
+  it('both are listed with live statuses in the DSA Night Study room', async () => {
     const a = await h.connect('Alice');
     const b = await h.connect('Bob');
 
     const ja = await a.join();
     expect(ja.room).toMatchObject({ id: ROOM_ID, name: 'DSA Night Study', code: 'DSA7K2' });
-    expect(ja.members.map((m) => [m.user.name, m.status])).toEqual([['Alice', 'IDLE']]);
+    // Every member is listed; absent ones are Offline (I-18). Bob is a member, not present yet.
+    expect(ja.members.map((m) => [m.user.name, m.status])).toEqual([
+      ['Alice', 'IDLE'],
+      ['Bob', 'OFFLINE'],
+    ]);
     expect(ja.session).toBeNull();
 
     const markA = a.mark();

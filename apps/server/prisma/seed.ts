@@ -2,8 +2,8 @@
  * Development seed (DATABASE_DESIGN §11), simplified for Phase 1. Development only: the env
  * guard refuses NODE_ENV=production, and existing demo users are never overwritten.
  *
- * Creates three demo users in different timezones, makes them members of the prototype room
- * "DSA Night Study" (DSA7K2), adds personal tasks, and records two weeks of study history
+ * Creates three demo users in different timezones, makes them members of the demo room
+ * "DSA Night Study" (code DSA7K2), adds personal tasks, and records two weeks of study history
  * THROUGH THE REAL SESSION SERVICE with a fake clock (breaks, midnight-spanning sessions and
  * solo → room moves included), so totals, streaks and history look realistic.
  *
@@ -11,7 +11,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { PROTOTYPE_ROOM, minutesToMs } from '@studysync/shared';
+import { minutesToMs } from '@studysync/shared';
 import { loadEnv } from '../src/config/env';
 import { ManualClock } from '../src/lib/clock';
 import { createLogger } from '../src/lib/logger';
@@ -27,6 +27,12 @@ try {
 const env = loadEnv();
 
 const DEMO_PASSWORD = 'studysync-demo';
+/** The demo room (the Phase 0 prototype room's name and code). Join it by code: DSA7K2. */
+const PROTOTYPE_ROOM = {
+  id: '5e1f0d5a-0000-4000-8000-000000000001',
+  name: 'DSA Night Study',
+  code: 'DSA7K2',
+} as const;
 const USERS = [
   { name: 'Atharva', email: 'atharva@demo.studysync.local', timezone: 'Asia/Kolkata' },
   { name: 'Maya', email: 'maya@demo.studysync.local', timezone: 'America/New_York' },

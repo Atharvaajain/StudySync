@@ -270,13 +270,14 @@ describe('INT-USERS profile and timezone', () => {
     }
   });
 
-  it('does not expose any endpoint outside the Phase 1 scope (D-2, D-4)', async () => {
+  it('exposes no endpoint outside the approved scope (D-2, D-4)', async () => {
     const { auth } = await register(h);
     for (const [method, path] of [
       ['delete', '/api/v1/users/me'],
       ['post', '/api/v1/auth/password-reset'],
-      ['post', '/api/v1/rooms'],
-      ['post', '/api/v1/rooms/join'],
+      ['delete', '/api/v1/rooms/5e1f0d5a-0000-4000-8000-000000000001'],
+      ['post', '/api/v1/rooms/5e1f0d5a-0000-4000-8000-000000000001/leave'],
+      ['patch', '/api/v1/rooms/5e1f0d5a-0000-4000-8000-000000000001'],
     ] as const) {
       const client = api(h);
       const res = await client[method](path)

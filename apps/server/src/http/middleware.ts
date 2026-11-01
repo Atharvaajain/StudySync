@@ -45,6 +45,9 @@ export interface HttpRateLimits {
   registerPerIpHour: number;
   refreshPerIp: number;
   readsPerUser: number;
+  joinPerUserMinute: number;
+  joinPerUserHour: number;
+  joinPerIpHour: number;
 }
 
 export const DEFAULT_HTTP_RATE_LIMITS: HttpRateLimits = {
@@ -53,6 +56,9 @@ export const DEFAULT_HTTP_RATE_LIMITS: HttpRateLimits = {
   registerPerIpHour: 5,
   refreshPerIp: 30,
   readsPerUser: 300,
+  joinPerUserMinute: 10,
+  joinPerUserHour: 30,
+  joinPerIpHour: 60,
 };
 
 /** Generous limits for automated test runs only (NODE_ENV=test + RELAX_RATE_LIMITS=true). */
@@ -62,6 +68,9 @@ export const RELAXED_HTTP_RATE_LIMITS: HttpRateLimits = {
   registerPerIpHour: 10_000,
   refreshPerIp: 10_000,
   readsPerUser: 100_000,
+  joinPerUserMinute: 10_000,
+  joinPerUserHour: 10_000,
+  joinPerIpHour: 10_000,
 };
 
 const ipKey = (req: Request): string => ipKeyGenerator(req.ip ?? 'unknown');

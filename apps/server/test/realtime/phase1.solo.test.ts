@@ -310,7 +310,7 @@ describe('INT-TASKS personal tasks', () => {
     ).toBe(400);
   });
 
-  it('SEC-2: another user can never read or change my tasks; room tasks wait for Phase 2', async () => {
+  it('SEC-2: another user can never read or change my tasks; non-members never touch room tasks', async () => {
     const a = await h.connect('Atharva');
     const b = await h.connect('Bilal');
     const task = await addTask(a, 'Mine');
@@ -327,7 +327,7 @@ describe('INT-TASKS personal tasks', () => {
       .set(...bearer(h.tokenFor(b.userId)));
     expect(bList.body.items).toEqual([]);
     expect(code(await a.call('task_add', { id: r(), roomId: r(), title: 'room task' }))).toBe(
-      'VALIDATION_ERROR',
+      'NOT_FOUND', // not a member of that room (no existence leak)
     );
     for (const bad of [
       { id: r(), roomId: null, title: '' },

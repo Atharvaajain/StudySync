@@ -1,7 +1,7 @@
 /**
  * Typed Socket.IO contract (API_DESIGN §7–§8). Event names are the spec's names, verbatim.
- * Phase 1: room presence (Phase 0 room), the timer commands, task attach, personal tasks,
- * resync and token renewal.
+ * No event starts, stops or changes a timer for a room or for another user (R2): room events
+ * only describe presence, each member's own status and shared tasks.
  */
 import type { ErrorCode } from '../errors';
 import type {
@@ -59,11 +59,20 @@ export interface PersonalTaskUpdatedPayload {
   taskId: string;
 }
 
+export interface RoomTaskUpdatedPayload {
+  roomId: string;
+  action: 'added' | 'updated' | 'deleted';
+  task?: TaskDto;
+  taskId: string;
+  actorId: string;
+}
+
 export interface ServerToClientEvents {
   session_state: (payload: SessionStatePayload) => void;
   member_joined: (payload: { roomId: string; member: MemberStatusDto }) => void;
   member_left: (payload: { roomId: string; userId: string }) => void;
   status_changed: (payload: { roomId: string; member: MemberStatusDto }) => void;
+  room_task_updated: (payload: RoomTaskUpdatedPayload) => void;
   personal_task_updated: (payload: PersonalTaskUpdatedPayload) => void;
   auth_expired: (payload: Record<string, never>) => void;
 }

@@ -16,6 +16,14 @@ export type DomainEvent =
       action: 'added' | 'updated' | 'deleted';
       taskId: string;
       task?: TaskDto;
+    }
+  | {
+      type: 'room_task_changed';
+      roomId: string;
+      actorId: string;
+      action: 'added' | 'updated' | 'deleted';
+      taskId: string;
+      task?: TaskDto;
     };
 
 export type DomainEventListener = (event: DomainEvent) => void;

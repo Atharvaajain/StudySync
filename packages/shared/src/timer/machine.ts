@@ -6,8 +6,8 @@
  *   the break's `endsAt`, then BREAK_OVER (§13.2).
  * - System events can never enter STUDYING; only `start_study` / `resume_study` (user) can (R5).
  *
- * Implemented: transition-table rows 1–6 and 11–21. Rows 7–10 (idle / disconnect auto-save,
- * liveness) arrive in Phase 2.
+ * User commands: transition-table rows 1–6 and 11–21 (`decide`). System events — liveness lost
+ * or regained and the idle / disconnect auto-saves (rows 7–10) — live in `./system.ts`.
  */
 import { isBreakMinutes, minutesToMs, type BreakMinutes } from '../constants';
 import type { Phase } from '../dto';
@@ -35,6 +35,8 @@ export interface SessionCore {
   readonly currentSegmentStartedAt: EpochMs | null;
   /** Non-null iff ON_BREAK or BREAK_OVER. */
   readonly currentBreak: BreakCore | null;
+  /** Non-null while in the 2-minute disconnect grace (row 8); the phase is unchanged. */
+  readonly disconnectedAt?: EpochMs | null;
   readonly version: number;
 }
 
@@ -56,8 +58,9 @@ export interface DecideContext {
   readonly callerRoomId: string | null;
 }
 
-export type SegmentEndReason = 'BREAK' | 'ENDED_BY_USER' | 'ROOM_MOVE';
-export type BreakCloseReason = 'RESUMED' | 'ENDED_BY_USER';
+export type SegmentEndReason = 'BREAK' | 'ENDED_BY_USER' | 'ROOM_MOVE' | 'DISCONNECTED';
+export type BreakCloseReason = 'RESUMED' | 'ENDED_BY_USER' | 'DISCONNECTED' | 'IDLE_TIMEOUT';
+export type SessionEndReason = 'USER' | 'DISCONNECTED' | 'IDLE_TIMEOUT';
 
 export type Effect =
   | {
@@ -77,14 +80,18 @@ export type Effect =
   | { readonly type: 'CLOSE_BREAK'; readonly at: EpochMs; readonly reason: BreakCloseReason }
   | { readonly type: 'SET_ROOM'; readonly roomId: string }
   | { readonly type: 'SET_TASK'; readonly taskId: string | null }
-  | { readonly type: 'END_SESSION'; readonly at: EpochMs; readonly reason: 'USER' };
+  | { readonly type: 'SET_DISCONNECTED'; readonly at: EpochMs | null }
+  | { readonly type: 'END_SESSION'; readonly at: EpochMs; readonly reason: SessionEndReason };
 
-export type TimerEventType =
+export type UserEventType =
   'STARTED' | 'BREAK_TAKEN' | 'RESUMED' | 'ENDED' | 'MOVED_TO_ROOM' | 'TASK_SET';
+export type SystemEventType =
+  'DISCONNECTED' | 'LEASE_LOST' | 'RECONNECTED' | 'GRACE_EXPIRED' | 'IDLE_TIMEOUT';
+export type TimerEventType = UserEventType | SystemEventType;
 
 export interface TimerEvent {
   readonly type: TimerEventType;
-  readonly actor: 'USER';
+  readonly actor: 'USER' | 'SYSTEM';
   readonly fromPhase: PhaseOrNone;
   readonly toPhase: PhaseOrNone | 'ENDED';
   readonly at: EpochMs;

@@ -79,6 +79,8 @@ export interface RealtimeDeps {
   scheduler: DeadlineScheduler;
   logger: Logger;
   rateLimits: RateLimitConfig;
+  /** True after `halt()` (crash simulation in tests): socket events are no longer processed. */
+  isHalted: () => boolean;
 }
 
 const authExpiryKey = (socketId: string): string => `auth-expiry:${socketId}`;
@@ -157,8 +159,13 @@ function registerConnection(
   }
   presence.addSocket(userId, socket.id);
   void socket.join(userChannel(userId));
+  /** §11.3: liveness is re-evaluated on connect, disconnect, join, leave, start and move. */
+  const evaluate = (): Promise<void> => sessions.evaluateLiveness(userId);
   // F-32: the refresh-proof timer — every (re)connect receives the authoritative state.
   socket.emit('session_state', sessions.statePayload(userId, 'CONNECT'));
+  void queue
+    .run(userId, evaluate)
+    .catch((err: unknown) => logger.error({ err }, 'liveness failed'));
 
   // RT-9: an expired socket gets `auth_expired` and is disconnected (unless renewed).
   const scheduleExpiry = (expiresAt: number): void => {
@@ -217,18 +224,20 @@ function registerConnection(
     );
   }
 
-  // ── rooms (Phase 0 prototype room) ──
+  // ── room presence (membership is REST: create / join by code) ──
 
   on('join_room', 'room', joinRoomSchema, async ({ roomId }) => {
     const { result, previousRoomId } = await roomPresence.join(userId, socket.id, roomId);
     if (previousRoomId) void socket.leave(roomChannel(previousRoomId));
     void socket.join(roomChannel(roomId));
-    return result;
+    await evaluate();
+    return { ...result, session: sessions.activeSessionDto(userId) };
   });
 
   on('leave_room', 'room', leaveRoomSchema, async ({ roomId }) => {
     await roomPresence.leave(userId, roomId);
     io.in(userChannel(userId)).socketsLeave(roomChannel(roomId));
+    await evaluate();
     return {} as Record<string, never>;
   });
 
@@ -255,6 +264,7 @@ function registerConnection(
         roomId: d.roomId,
         taskId: d.taskId,
       });
+      await evaluate();
       return { session: r.session! };
     },
     { sessionDetails: true },
@@ -322,7 +332,7 @@ function registerConnection(
     { sessionDetails: true },
   );
 
-  // ── personal tasks ──
+  // ── tasks (personal, and room tasks for members) ──
 
   on('task_add', 'task', taskAddSchema, async (d) => ({ task: await tasks.add(userId, d) }));
   on('task_toggle', 'task', taskToggleSchema, async (d) => ({
@@ -339,7 +349,13 @@ function registerConnection(
   socket.on('disconnect', () => {
     limiter.forget(socket.id);
     scheduler.cancel(authExpiryKey(socket.id));
-    void queue.run(userId, () => roomPresence.socketDisconnected(socket.id));
+    if (deps.isHalted()) return; // crash simulation: no disconnect is ever processed
+    void queue
+      .run(userId, async () => {
+        roomPresence.socketDisconnected(socket.id);
+        await evaluate();
+      })
+      .catch((err: unknown) => logger.error({ err, userId }, 'disconnect handling failed'));
   });
 }
 
@@ -374,6 +390,15 @@ function subscribeEmitter(io: StudySyncIo, deps: RealtimeDeps): void {
         io.to(roomChannel(event.roomId)).emit('status_changed', { roomId: event.roomId, member });
         return;
       }
+      case 'room_task_changed':
+        io.to(roomChannel(event.roomId)).emit('room_task_updated', {
+          roomId: event.roomId,
+          action: event.action,
+          taskId: event.taskId,
+          actorId: event.actorId,
+          ...(event.task ? { task: event.task } : {}),
+        });
+        return;
       case 'personal_task_changed':
         io.to(userChannel(event.userId)).emit(
           'personal_task_updated',

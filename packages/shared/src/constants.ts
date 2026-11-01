@@ -11,10 +11,10 @@ export function isBreakMinutes(value: unknown): value is BreakMinutes {
   return (BREAK_DURATIONS_MINUTES as readonly unknown[]).includes(value);
 }
 
-/** R9: disconnect grace (session auto-save arrives in Phase 2; the room display grace uses it now). */
+/** R9: disconnect grace — session auto-save and the room display grace (I-19). */
 export const DISCONNECT_GRACE_MS = 120_000;
 
-/** R10: idle timeout after the break countdown has finished (wired in Phase 2). */
+/** R10: idle timeout after the break countdown has finished. */
 export const BREAK_OVER_IDLE_TIMEOUT_MS = 1_800_000;
 
 /** R11: minimum recorded study per local day for a streak day. */
@@ -30,7 +30,7 @@ export const ROOM_MAX_MEMBERS = 50;
 /** ARCHITECTURE §12.1: sockets per user. */
 export const MAX_SOCKETS_PER_USER = 5;
 
-/** Liveness lease and sweeper cadence (Phase 2). */
+/** Liveness lease and sweeper cadence (ARCHITECTURE §13.6). */
 export const LEASE_REFRESH_MS = 30_000;
 export const LEASE_STALE_MS = 90_000;
 export const SWEEP_INTERVAL_MS = 5_000;
@@ -44,5 +44,8 @@ export function minutesToMs(minutes: number): number {
 export const CSRF_HEADER = 'X-StudySync-CSRF';
 export const REFRESH_COOKIE = 'ss_refresh';
 export const PERSONAL_TASK_LIMIT = 1_000;
+export const ROOM_TASK_LIMIT = 500;
+/** Rooms one user can create per rolling day (API_DESIGN §10). */
+export const ROOMS_PER_USER_PER_DAY = 20;
 export const HISTORY_PAGE_MAX = 100;
 export const STATS_MAX_RANGE_DAYS = 366;

@@ -6,7 +6,6 @@
 import { randomUUID } from 'node:crypto';
 import { io as connectClient, type Socket } from 'socket.io-client';
 import {
-  PROTOTYPE_ROOM,
   type AckResponse,
   type BreakMinutes,
   type ClientToServerEvents,
@@ -25,7 +24,13 @@ import type { RateLimitConfig } from '../../src/realtime/rateLimiter';
 import { createStudySyncServer, type StudySyncServer } from '../../src/server';
 import { createUser, resetDb, testDb, testEnv } from './db';
 
-export const ROOM_ID = PROTOTYPE_ROOM.id;
+/** The Phase 0 room, now a real room: every harness user is made a member on connect. */
+export const ROOM = {
+  id: '5e1f0d5a-0000-4000-8000-000000000001',
+  name: 'DSA Night Study',
+  code: 'DSA7K2',
+} as const;
+export const ROOM_ID = ROOM.id;
 export const START = Date.parse('2026-11-01T10:00:00.000Z');
 export const MIN = 60_000;
 
@@ -129,8 +134,8 @@ export class TestClient {
     return this.ok(await this.call('sync_state', {}));
   }
 
-  async join(): Promise<JoinRoomResult> {
-    const result = this.ok(await this.call('join_room', { roomId: ROOM_ID }));
+  async join(roomId: string = ROOM_ID): Promise<JoinRoomResult> {
+    const result = this.ok(await this.call('join_room', { roomId }));
     for (const m of result.members) this.trackMember(m);
     return result;
   }
@@ -186,8 +191,16 @@ export interface Harness {
   tokens: TokenService;
   /** Move the server clock forward and fire due deadlines (break-over pushes, display grace). */
   advance(ms: number): void;
-  /** Creates a user (unless `userId` is given) and connects a socket with a real JWT. */
-  connect(name: string, options?: { userId?: string; timezone?: string }): Promise<TestClient>;
+  /**
+   * Creates a user (unless `userId` is given) and connects a socket with a real JWT. New users
+   * become members of the test room unless `member: false`.
+   */
+  connect(
+    name: string,
+    options?: { userId?: string; timezone?: string; member?: boolean },
+  ): Promise<TestClient>;
+  /** Crash the server (no disconnect processed) and start a fresh instance on the same DB. */
+  crashAndRestart(): Promise<void>;
   /** Connect with arbitrary handshake auth; resolves with the connect_error message. */
   connectExpectingError(auth: unknown): Promise<string>;
   /** A valid access token for `userId` (REST calls). */
@@ -206,20 +219,36 @@ export async function startHarness(
 ): Promise<Harness> {
   const db = testDb();
   await resetDb(db);
+  const ensureMember = async (userId: string): Promise<void> => {
+    await db.room.upsert({
+      where: { id: ROOM.id },
+      update: {},
+      create: { ...ROOM, createdById: userId },
+    });
+    await db.roomMember.upsert({
+      where: { roomId_userId: { roomId: ROOM.id, userId } },
+      update: {},
+      create: { roomId: ROOM.id, userId },
+    });
+  };
   const clock = new ManualClock(options.start ?? START);
   // Long-lived tokens by default: timer tests fast-forward the clock by tens of minutes.
   const env = testEnv({ ACCESS_TOKEN_TTL_SEC: String(options.accessTokenTtlSec ?? 86_400) });
-  const server = createStudySyncServer({
-    env,
-    clock,
-    db,
-    logger: createLogger('silent'),
-    rateLimits: options.rateLimits ?? NO_LIMITS,
-    ...(options.httpRateLimits ? { httpRateLimits: options.httpRateLimits } : {}),
-  });
+  const boot = async () => {
+    const instance = createStudySyncServer({
+      env,
+      clock,
+      db,
+      logger: createLogger('silent'),
+      rateLimits: options.rateLimits ?? NO_LIMITS,
+      maintenanceIntervalMs: 0, // tests run `maintenance.tick()` explicitly
+      ...(options.httpRateLimits ? { httpRateLimits: options.httpRateLimits } : {}),
+    });
+    const address = await instance.listen(0, '127.0.0.1');
+    return { instance, url: `http://127.0.0.1:${address.port}` };
+  };
+  let { instance: server, url } = await boot();
   const tokens = new TokenService(env, clock);
-  const address = await server.listen(0, '127.0.0.1');
-  const url = `http://127.0.0.1:${address.port}`;
   const clients: TestClient[] = [];
 
   const open = (auth: unknown): ClientSocket =>
@@ -232,7 +261,7 @@ export async function startHarness(
       auth: auth as Record<string, unknown>,
     });
 
-  return {
+  const harness: Harness = {
     server,
     clock,
     url,
@@ -242,8 +271,11 @@ export async function startHarness(
       server.scheduler.runDue();
     },
     async connect(name, opts = {}) {
-      const userId =
-        opts.userId ?? (await createUser(db, { name, timezone: opts.timezone ?? 'UTC' })).id;
+      let userId = opts.userId;
+      if (!userId) {
+        userId = (await createUser(db, { name, timezone: opts.timezone ?? 'UTC' })).id;
+        if (opts.member !== false) await ensureMember(userId);
+      }
       const socket = open({ token: tokens.signAccess(userId).token });
       const client = new TestClient(socket, userId, name);
       await new Promise<void>((resolve, reject) => {
@@ -273,11 +305,18 @@ export async function startHarness(
     tokenFor(userId) {
       return tokens.signAccess(userId).token;
     },
+    async crashAndRestart() {
+      await server.halt();
+      ({ instance: server, url } = await boot());
+      harness.server = server;
+      harness.url = url;
+    },
     async close() {
       await Promise.all(clients.map((c) => c.disconnect()));
       await server.close();
     },
   };
+  return harness;
 }
 
 /** Two users present in the room. */

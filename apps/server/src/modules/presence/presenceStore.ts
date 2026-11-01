@@ -73,6 +73,28 @@ export class PresenceStore {
     return false;
   }
 
+  /** Users with at least one socket on this instance (solo liveness, lease §6.8). */
+  connectedUsers(): string[] {
+    return [...this.userSockets.keys()];
+  }
+
+  /** (user, room) pairs present on this instance (room liveness, lease §6.8). */
+  presentPairs(): { userId: string; roomId: string }[] {
+    const pairs = new Map<string, { userId: string; roomId: string }>();
+    for (const [socketId, roomId] of this.socketRoom) {
+      const userId = this.socketUser.get(socketId);
+      if (userId) pairs.set(`${userId}:${roomId}`, { userId, roomId });
+    }
+    return [...pairs.values()];
+  }
+
+  /** ARCHITECTURE §11.3 (D-7): solo — any socket; room session — present in that room. */
+  isLive(userId: string, sessionRoomId: string | null): boolean {
+    return sessionRoomId === null
+      ? this.socketCount(userId) > 0
+      : this.isPresent(sessionRoomId, userId);
+  }
+
   /** The room the user is present in (I-08: one room at a time), or null. */
   roomOfUser(userId: string): string | null {
     for (const socketId of this.userSockets.get(userId) ?? []) {

@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { SWEEP_INTERVAL_MS } from '@studysync/shared';
 import type { Env } from './config/env';
 import { DomainEvents } from './events/domainEvents';
 import { createHttpApp } from './http/app';
@@ -23,7 +24,8 @@ import { TokenService } from './modules/auth/tokens';
 import { MemberStatusService } from './modules/presence/memberStatusService';
 import { PresenceStore } from './modules/presence/presenceStore';
 import { RoomPresenceService } from './modules/presence/roomPresenceService';
-import { RoomRegistry } from './modules/rooms/roomRegistry';
+import { RoomService } from './modules/rooms/roomService';
+import { Maintenance } from './modules/sessions/maintenance';
 import { SessionService } from './modules/sessions/sessionService';
 import { StatsService } from './modules/stats/statsService';
 import { TaskService } from './modules/tasks/taskService';
@@ -40,6 +42,10 @@ export interface CreateServerOptions {
   rateLimits?: RateLimitConfig;
   httpRateLimits?: HttpRateLimits;
   newId?: () => string;
+  /** Room code generator (tests force collisions with it, CT-11). */
+  newRoomCode?: () => string;
+  /** Sweeper / lease cadence; 0 = no automatic ticks (tests call `maintenance.tick()`). */
+  maintenanceIntervalMs?: number;
 }
 
 export interface StudySyncServer {
@@ -51,11 +57,15 @@ export interface StudySyncServer {
   sessions: SessionService;
   tasks: TaskService;
   stats: StatsService;
+  rooms: RoomService;
   presence: PresenceStore;
+  maintenance: Maintenance;
   httpServer: HttpServer;
   io: StudySyncIo;
   listen(port: number, host?: string): Promise<AddressInfo>;
   close(): Promise<void>;
+  /** Crash simulation (tests): stop processing without handling any disconnect. */
+  halt(): Promise<void>;
 }
 
 export function createStudySyncServer(options: CreateServerOptions): StudySyncServer {
@@ -76,8 +86,23 @@ export function createStudySyncServer(options: CreateServerOptions): StudySyncSe
   const tokens = new TokenService(env, clock);
   const users = new UserService(db, directory);
   const auth = new AuthService({ db, env, clock, tokens, users });
-  const rooms = new RoomRegistry(db, clock);
-  const sessions = new SessionService({ db, clock, scheduler, events, queue, newId, logger });
+  const rooms = new RoomService({
+    db,
+    clock,
+    ...(options.newRoomCode ? { newCode: options.newRoomCode } : {}),
+  });
+  const sessions = new SessionService({
+    db,
+    clock,
+    scheduler,
+    events,
+    queue,
+    newId,
+    logger,
+    isLive: (userId, roomId) => presence.isLive(userId, roomId),
+  });
+  const maintenance = new Maintenance({ db, clock, presence, sessions, queue, logger });
+  let halted = false;
   const tasks = new TaskService({ db, clock, events });
   const stats = new StatsService({ db, clock });
   const memberStatus = new MemberStatusService({ presence, sessions, users: directory, rooms });
@@ -86,6 +111,7 @@ export function createStudySyncServer(options: CreateServerOptions): StudySyncSe
     memberStatus,
     sessions,
     rooms,
+    tasks,
     scheduler,
     events,
     queue,
@@ -108,6 +134,9 @@ export function createStudySyncServer(options: CreateServerOptions): StudySyncSe
     tasks,
     sessions,
     stats,
+    rooms,
+    memberStatus,
+    maintenance,
     rateLimits: httpRateLimits,
   });
   const httpServer = createServer(app);
@@ -125,6 +154,7 @@ export function createStudySyncServer(options: CreateServerOptions): StudySyncSe
     scheduler,
     logger,
     rateLimits: options.rateLimits ?? DEFAULT_RATE_LIMITS,
+    isHalted: () => halted,
   });
 
   return {
@@ -136,21 +166,41 @@ export function createStudySyncServer(options: CreateServerOptions): StudySyncSe
     sessions,
     tasks,
     stats,
+    rooms,
     presence,
+    maintenance,
     httpServer,
     io,
     listen(port, host = env.HOST) {
       return new Promise((resolve, reject) => {
         httpServer.once('error', reject);
-        httpServer.listen(port, host, () => resolve(httpServer.address() as AddressInfo));
+        httpServer.listen(port, host, () => {
+          const interval = options.maintenanceIntervalMs ?? SWEEP_INTERVAL_MS;
+          if (interval > 0) maintenance.start(interval); // also sweeps once at boot (§13.9)
+          resolve(httpServer.address() as AddressInfo);
+        });
       });
     },
     async close() {
+      // Shutdown is not a user disconnect: sessions stay live through a restart (the lease
+      // and the clients' reconnect decide, §13.9). Pending work finishes before the DB closes.
+      halted = true;
+      maintenance.stop();
       scheduler.dispose();
       await new Promise<void>((resolve) => {
         void io.close(() => resolve());
       });
+      await queue.drain();
       if (ownsDb) await db.$disconnect();
+    },
+    async halt() {
+      halted = true;
+      maintenance.stop();
+      scheduler.dispose();
+      await new Promise<void>((resolve) => {
+        void io.close(() => resolve());
+      });
+      await queue.drain();
     },
   };
 }

@@ -1,15 +1,14 @@
 /**
- * Personal tasks (ARCHITECTURE §15, API_DESIGN §7). Reads are REST; mutations are socket events.
+ * Tasks (ARCHITECTURE §15, API_DESIGN §7, I-13–I-16). Reads are REST; mutations are socket events.
+ * - Personal tasks (`room_id` NULL): owner only. Room tasks: members only (404 otherwise).
  * - task_add is idempotent on the client-generated id.
  * - task_toggle has set semantics (I-14): `done` is the target state, a no-op if already there.
  * - task_update is versioned (`expectedVersion` → VERSION_CONFLICT with the current task).
- * - task_delete is a soft delete. Deleted tasks are invisible (404) but still resolve in
- *   session summaries (E-22).
- * Tasks never affect study time (F-28).
- *
- * PHASE 1 scope: personal tasks only. Room tasks arrive in Phase 2.
+ * - task_delete is a soft delete. Room tasks: task creator or room creator (FORBIDDEN).
+ * - Changes are published after commit: `personal_task_updated` to my devices,
+ *   `room_task_updated` to the room. Tasks never affect study time (F-28).
  */
-import { PERSONAL_TASK_LIMIT, type TaskDto } from '@studysync/shared';
+import { PERSONAL_TASK_LIMIT, ROOM_TASK_LIMIT, type TaskDto } from '@studysync/shared';
 import type { DomainEvents } from '../../events/domainEvents';
 import type { Clock } from '../../lib/clock';
 import { lockUser, transaction, type Db, type Prisma, type Tx } from '../../lib/db';
@@ -43,6 +42,13 @@ export function toTaskDto(t: TaskRow): TaskDto {
 const toDueDate = (date: string | null | undefined): Date | null | undefined =>
   date === undefined ? undefined : date === null ? null : new Date(`${date}T00:00:00.000Z`);
 
+const ORDER: Prisma.TaskOrderByWithRelationInput[] = [
+  { status: 'asc' },
+  { dueDate: { sort: 'asc', nulls: 'last' } },
+  { createdAt: 'asc' },
+  { id: 'asc' },
+];
+
 export interface AddTaskInput {
   id: string;
   roomId: string | null;
@@ -59,46 +65,63 @@ export interface UpdateTaskInput {
   dueDate?: string | null | undefined;
 }
 
+type Action = 'added' | 'updated' | 'deleted';
+
 export class TaskService {
   constructor(private readonly deps: { db: Db; clock: Clock; events: DomainEvents }) {}
 
-  /** GET /tasks — the caller's live personal tasks: status, due date, creation order. */
+  /** GET /tasks — the caller's live personal tasks. */
   async list(userId: string, status?: 'TODO' | 'DONE'): Promise<TaskDto[]> {
     const rows = await this.deps.db.task.findMany({
       where: { userId, roomId: null, deletedAt: null, ...(status ? { status } : {}) },
       include: taskInclude,
-      orderBy: [
-        { status: 'asc' },
-        { dueDate: { sort: 'asc', nulls: 'last' } },
-        { createdAt: 'asc' },
-        { id: 'asc' },
-      ],
+      orderBy: ORDER,
+    });
+    return rows.map(toTaskDto);
+  }
+
+  /** Room tasks (membership is checked by the caller). */
+  async listRoom(roomId: string, status?: 'TODO' | 'DONE'): Promise<TaskDto[]> {
+    const rows = await this.deps.db.task.findMany({
+      where: { roomId, deletedAt: null, ...(status ? { status } : {}) },
+      include: taskInclude,
+      orderBy: ORDER,
     });
     return rows.map(toTaskDto);
   }
 
   async add(userId: string, input: AddTaskInput): Promise<TaskDto> {
-    if (input.roomId !== null) {
-      throw new AppError('VALIDATION_ERROR', { reason: 'Room tasks arrive in Phase 2.' });
-    }
     const { task, created } = await transaction(this.deps.db, async (tx) => {
-      await lockUser(tx, userId); // count + insert atomically (personal task limit)
+      if (input.roomId !== null) {
+        await this.assertMember(tx, input.roomId, userId);
+        // Serialize room task inserts so the room limit holds.
+        await tx.$queryRaw`SELECT id FROM rooms WHERE id = ${input.roomId}::uuid FOR UPDATE`;
+      } else {
+        await lockUser(tx, userId); // count + insert atomically (personal task limit)
+      }
       const existing = await tx.task.findUnique({ where: { id: input.id }, include: taskInclude });
       if (existing) {
         // A replayed id returns the existing task (idempotent retry).
-        if (existing.userId !== userId || existing.roomId !== null)
-          throw new AppError('ID_CONFLICT');
+        const same = existing.userId === userId && existing.roomId === input.roomId;
+        if (!same) throw new AppError('ID_CONFLICT');
         if (existing.deletedAt !== null) throw new AppError('NOT_FOUND');
         return { task: existing, created: false };
       }
-      const live = await tx.task.count({ where: { userId, roomId: null, deletedAt: null } });
-      if (live >= PERSONAL_TASK_LIMIT) throw new AppError('TASK_LIMIT_REACHED');
+      const live = await tx.task.count({
+        where:
+          input.roomId === null
+            ? { userId, roomId: null, deletedAt: null }
+            : { roomId: input.roomId, deletedAt: null },
+      });
+      if (live >= (input.roomId === null ? PERSONAL_TASK_LIMIT : ROOM_TASK_LIMIT)) {
+        throw new AppError('TASK_LIMIT_REACHED');
+      }
       const now = new Date(this.deps.clock.now());
       const row = await tx.task.create({
         data: {
           id: input.id,
           userId,
-          roomId: null,
+          roomId: input.roomId,
           title: input.title,
           description: input.description ?? null,
           dueDate: toDueDate(input.dueDate) ?? null,
@@ -110,13 +133,13 @@ export class TaskService {
       return { task: row, created: true };
     });
     const dto = toTaskDto(task);
-    if (created) this.publish(userId, 'added', dto);
+    if (created) this.publish(userId, 'added', dto.roomId, dto.id, dto);
     return dto;
   }
 
   async toggle(userId: string, taskId: string, done: boolean): Promise<TaskDto> {
-    const task = await transaction(this.deps.db, async (tx) => {
-      const current = await this.lockOwn(tx, userId, taskId);
+    const result = await transaction(this.deps.db, async (tx) => {
+      const { task: current } = await this.lockAccessible(tx, userId, taskId);
       const target = done ? 'DONE' : 'TODO';
       if (current.status === target) return { row: current, changed: false };
       const now = new Date(this.deps.clock.now());
@@ -133,14 +156,14 @@ export class TaskService {
       });
       return { row, changed: true };
     });
-    const dto = toTaskDto(task.row);
-    if (task.changed) this.publish(userId, 'updated', dto);
+    const dto = toTaskDto(result.row);
+    if (result.changed) this.publish(userId, 'updated', dto.roomId, dto.id, dto);
     return dto;
   }
 
   async update(userId: string, input: UpdateTaskInput): Promise<TaskDto> {
     const row = await transaction(this.deps.db, async (tx) => {
-      const current = await this.lockOwn(tx, userId, input.taskId);
+      const { task: current } = await this.lockAccessible(tx, userId, input.taskId);
       if (current.version !== input.expectedVersion) {
         throw new AppError('VERSION_CONFLICT', { current: toTaskDto(current) });
       }
@@ -155,51 +178,83 @@ export class TaskService {
       return tx.task.update({ where: { id: input.taskId }, data, include: taskInclude });
     });
     const dto = toTaskDto(row);
-    this.publish(userId, 'updated', dto);
+    this.publish(userId, 'updated', dto.roomId, dto.id, dto);
     return dto;
   }
 
-  /** Soft delete. Deleting an already-deleted own task is a no-op. */
+  /** Soft delete. Deleting an already-deleted visible task is a no-op. */
   async remove(userId: string, taskId: string): Promise<void> {
     const deleted = await transaction(this.deps.db, async (tx) => {
-      const rows = await tx.$queryRaw<{ deleted_at: Date | null }[]>`
-        SELECT deleted_at FROM tasks
-        WHERE id = ${taskId}::uuid AND user_id = ${userId}::uuid AND room_id IS NULL FOR UPDATE`;
-      const row = rows[0];
-      if (!row) throw new AppError('NOT_FOUND');
-      if (row.deleted_at !== null) return false;
+      const { task, roomCreatorId } = await this.lockAccessible(tx, userId, taskId, {
+        includeDeleted: true,
+      });
+      // I-16: a room task can be deleted by its creator or by the room's creator.
+      if (task.roomId !== null && task.userId !== userId && roomCreatorId !== userId) {
+        throw new AppError('FORBIDDEN');
+      }
+      if (task.deletedAt !== null) return null; // already deleted: nothing to publish
       const now = new Date(this.deps.clock.now());
       await tx.task.update({
         where: { id: taskId },
         data: { deletedAt: now, updatedAt: now, version: { increment: 1 } },
       });
-      return true;
+      return { roomId: task.roomId };
     });
-    if (deleted) this.publish(userId, 'deleted', undefined, taskId);
+    if (deleted !== null) this.publish(userId, 'deleted', deleted.roomId, taskId);
   }
 
-  /** Locks and returns the caller's live personal task, or throws NOT_FOUND. */
-  private async lockOwn(tx: Tx, userId: string, taskId: string): Promise<TaskRow> {
-    const locked = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM tasks
-      WHERE id = ${taskId}::uuid AND user_id = ${userId}::uuid AND room_id IS NULL
-        AND deleted_at IS NULL
-      FOR UPDATE`;
-    if (locked.length === 0) throw new AppError('NOT_FOUND');
-    return tx.task.findUniqueOrThrow({ where: { id: taskId }, include: taskInclude });
+  /**
+   * Locks and returns a task the caller may change: their own personal task, or a task of a
+   * room they are a member of. Anything else is NOT_FOUND (no existence leak).
+   */
+  private async lockAccessible(
+    tx: Tx,
+    userId: string,
+    taskId: string,
+    options: { includeDeleted?: boolean } = {},
+  ): Promise<{ task: TaskRow; roomCreatorId: string | null }> {
+    const rows = await tx.$queryRaw<
+      { user_id: string; room_id: string | null; deleted_at: Date | null }[]
+    >`
+      SELECT user_id, room_id, deleted_at FROM tasks WHERE id = ${taskId}::uuid FOR UPDATE`;
+    const row = rows[0];
+    if (!row || (row.deleted_at !== null && !options.includeDeleted))
+      throw new AppError('NOT_FOUND');
+    let roomCreatorId: string | null = null;
+    if (row.room_id === null) {
+      if (row.user_id !== userId) throw new AppError('NOT_FOUND');
+    } else {
+      await this.assertMember(tx, row.room_id, userId);
+      const room = await tx.room.findUniqueOrThrow({
+        where: { id: row.room_id },
+        select: { createdById: true },
+      });
+      roomCreatorId = room.createdById;
+    }
+    const task = await tx.task.findUniqueOrThrow({ where: { id: taskId }, include: taskInclude });
+    return { task, roomCreatorId };
+  }
+
+  private async assertMember(tx: Tx, roomId: string, userId: string): Promise<void> {
+    const member = await tx.roomMember.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+      select: { userId: true },
+    });
+    if (!member) throw new AppError('NOT_FOUND');
   }
 
   private publish(
     userId: string,
-    action: 'added' | 'updated' | 'deleted',
+    action: Action,
+    roomId: string | null,
+    taskId: string,
     task?: TaskDto,
-    taskId?: string,
   ): void {
-    const id = task?.id ?? taskId!;
+    const withTask = task ? { task } : {};
     this.deps.events.publish(
-      task
-        ? { type: 'personal_task_changed', userId, action, taskId: id, task }
-        : { type: 'personal_task_changed', userId, action, taskId: id },
+      roomId === null
+        ? { type: 'personal_task_changed', userId, action, taskId, ...withTask }
+        : { type: 'room_task_changed', roomId, actorId: userId, action, taskId, ...withTask },
     );
   }
 }
