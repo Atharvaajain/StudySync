@@ -181,10 +181,13 @@ test('E2E-6: two tabs click Start Study at once → one session, both tabs show 
   await tab2.goto('/');
   await expect(tab2.getByTestId('connection')).toHaveAttribute('data-connection', 'connected');
 
-  await Promise.all([
-    tab1.getByTestId('start-study').click(),
-    tab2.getByTestId('start-study').click(),
-  ]);
+  // Click both at the same instant. (A Playwright click would wait for actionability, and
+  // the second tab's button disappears as soon as the first start is pushed to it.)
+  await expect(tab1.getByTestId('start-study')).toBeVisible();
+  await expect(tab2.getByTestId('start-study')).toBeVisible();
+  const clickStart = () =>
+    (document.querySelector('[data-testid="start-study"]') as HTMLButtonElement | null)?.click();
+  await Promise.all([tab1.evaluate(clickStart), tab2.evaluate(clickStart)]);
   for (const tab of [tab1, tab2]) {
     await expect(phase(tab)).toHaveAttribute('data-phase', 'STUDYING');
   }

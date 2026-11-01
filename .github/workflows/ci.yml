@@ -14,8 +14,21 @@ concurrency:
 
 jobs:
   checks:
-    name: Typecheck · lint · format · unit + realtime tests
+    name: Typecheck · lint · format · unit + integration tests (PostgreSQL)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: studysync
+          POSTGRES_PASSWORD: studysync
+          POSTGRES_DB: studysync_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U studysync" --health-interval 5s --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://studysync:studysync@127.0.0.1:5432/studysync_test?schema=public
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,15 +36,30 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      # R12: the database runs in UTC (same as scripts/dev-db.sh).
+      - run: psql "postgresql://studysync:studysync@127.0.0.1:5432/studysync_test" -c "ALTER DATABASE studysync_test SET timezone TO 'UTC'"
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
       - run: npm test
 
   e2e:
-    name: Two-browser E2E (Playwright)
+    name: E2E (Playwright, real server + PostgreSQL)
     runs-on: ubuntu-latest
     needs: checks
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: studysync
+          POSTGRES_PASSWORD: studysync
+          POSTGRES_DB: studysync_e2e
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U studysync" --health-interval 5s --health-timeout 5s
+          --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgresql://studysync:studysync@127.0.0.1:5432/studysync_e2e?schema=public
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,6 +67,7 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - run: psql "postgresql://studysync:studysync@127.0.0.1:5432/studysync_e2e" -c "ALTER DATABASE studysync_e2e SET timezone TO 'UTC'"
       # CI runners have no pre-installed browser (unlike the cloud dev container).
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e

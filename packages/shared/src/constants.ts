@@ -11,13 +11,13 @@ export function isBreakMinutes(value: unknown): value is BreakMinutes {
   return (BREAK_DURATIONS_MINUTES as readonly unknown[]).includes(value);
 }
 
-/** R9: disconnect grace (session auto-save arrives in Phase 2; display grace uses it in Phase 0). */
+/** R9: disconnect grace (session auto-save arrives in Phase 2; the room display grace uses it now). */
 export const DISCONNECT_GRACE_MS = 120_000;
 
 /** R10: idle timeout after the break countdown has finished (wired in Phase 2). */
 export const BREAK_OVER_IDLE_TIMEOUT_MS = 1_800_000;
 
-/** R11: minimum recorded study per local day for a streak day (Phase 3). */
+/** R11: minimum recorded study per local day for a streak day. */
 export const STREAK_MIN_STUDY_MS = 1_500_000;
 
 /** R17: room codes — 6 characters, no O/0/I/1. */

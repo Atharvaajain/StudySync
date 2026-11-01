@@ -27,6 +27,7 @@ import type {
 } from '@studysync/shared';
 import { accessToken, onAuthChange, refreshSession } from '../lib/api';
 import { serverClock } from '../lib/serverClock';
+import { acceptSession } from './sessionGuard';
 
 export type StudySocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'failed';
@@ -69,19 +70,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   const applySession = useCallback((incoming: SessionDto | null, cause?: SessionCause) => {
     setSessionState((current) => {
-      const held = current.session;
-      let next: SessionDto | null;
-      if (incoming === null) {
-        if (held) ended.current.add(held.id);
-        next = null;
-      } else if (ended.current.has(incoming.id)) {
-        next = held; // a stale push about a session that already ended
-      } else if (held && held.id === incoming.id && incoming.version < held.version) {
-        next = held;
-      } else {
-        next = incoming;
-      }
-      if (next === held && cause === undefined) return current;
+      const next = acceptSession(current.session, incoming, ended.current);
+      if (next === current.session && cause === undefined) return current;
       return { session: next, cause: cause ?? current.cause, revision: current.revision + 1 };
     });
   }, []);

@@ -1,7 +1,7 @@
 /**
  * Wire DTOs (API_DESIGN §2). Instants are ISO-8601 UTC strings with `Z`; durations are ms.
- * Phase 0 implements the subset needed by the prototype; fields that belong to later phases
- * are present with their documented "empty" value (e.g. `task: null`).
+ * Fields that belong to later phases are present with their documented "empty" value
+ * (e.g. `disconnectedAt: null` until auto-save arrives in Phase 2).
  */
 import type { BreakMinutes } from './constants';
 
@@ -93,9 +93,9 @@ export interface SessionSummaryDto {
 export interface JoinRoomResult {
   room: RoomDto;
   members: MemberStatusDto[];
-  /** Room tasks arrive in Phase 2; always empty in Phase 0. */
+  /** Room tasks arrive in Phase 2; always empty until then. */
   tasks: never[];
-  /** "Today in this room" arrives in Phase 2; always null in Phase 0. */
+  /** "Today in this room" arrives in Phase 2; always null until then. */
   today: null;
   session: SessionDto | null;
   serverNow: Instant;

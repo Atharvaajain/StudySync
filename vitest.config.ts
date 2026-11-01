@@ -13,6 +13,14 @@ export default defineConfig({
       },
       {
         test: {
+          name: 'web-unit',
+          root: './apps/web',
+          include: ['test/**/*.test.ts'],
+          environment: 'node',
+        },
+      },
+      {
+        test: {
           name: 'server-unit',
           root: './apps/server',
           include: ['test/unit/**/*.test.ts'],

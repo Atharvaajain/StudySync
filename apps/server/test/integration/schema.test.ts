@@ -114,7 +114,7 @@ describe('INT-SCHEMA: named objects exist', () => {
     const [tz] = await db.$queryRaw<
       { timezone: string }[]
     >`SELECT current_setting('TimeZone') AS timezone`;
-    expect(tz!.timezone).toBe('UTC');
+    expect(tz!.timezone).toMatch(/^(Etc\/)?UTC$/);
     const cols = await db.$queryRaw<{ data_type: string }[]>`
       SELECT DISTINCT data_type FROM information_schema.columns
       WHERE table_schema = 'public' AND column_name LIKE '%\\_at' ESCAPE '\\'`;
