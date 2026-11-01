@@ -258,6 +258,8 @@ describe('INT-USERS profile and timezone', () => {
       .set(...bearer(auth.accessToken));
     expect(me.body).toMatchObject({ name: 'Atharva J', timezone: 'America/New_York' });
 
+    // Legacy browser ids are stored under their current IANA name (PostgreSQL knows that one).
+    expect((await patch({ timezone: 'Asia/Calcutta' })).body.timezone).toBe('Asia/Kolkata');
     expect((await patch({ timezone: 'Europe/Atlantis' })).body.error.code).toBe('INVALID_TIMEZONE');
     for (const bad of [{}, { email: 'x@example.com' }, { name: '' }, { timezone: 5 }]) {
       const res = await patch(bad);
@@ -276,8 +278,8 @@ describe('INT-USERS profile and timezone', () => {
       ['post', '/api/v1/rooms'],
       ['post', '/api/v1/rooms/join'],
     ] as const) {
-      const res = await api(h)
-        [method](path)
+      const client = api(h);
+      const res = await client[method](path)
         .set(...bearer(auth.accessToken))
         .send({});
       expect(res.status, `${method} ${path}`).toBe(404);

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { BREAK_DURATIONS_MINUTES } from './constants';
-import { isValidTimeZone } from './time';
+import { canonicalTimeZone, isValidTimeZone } from './time';
 
 /**
  * Shared Zod schemas for every client → server boundary (ARCHITECTURE §9.8, §17.3).
@@ -20,10 +20,12 @@ export const localDateSchema = z.iso.date();
 
 export const nameSchema = z.string().trim().min(1).max(50);
 export const emailSchema = z.string().trim().toLowerCase().pipe(z.email().max(254));
+/** IANA zone, stored under its current name (legacy browser ids such as Asia/Calcutta mapped). */
 export const timezoneSchema = z
   .string()
   .min(1)
   .max(64)
+  .transform(canonicalTimeZone)
   .refine(isValidTimeZone, { message: 'INVALID_TIMEZONE' });
 
 /** UTF-8 byte length (same result as TextEncoder; lone surrogates count as U+FFFD = 3 bytes). */

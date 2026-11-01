@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   breakRemainingMs,
   canResume,
@@ -19,6 +19,10 @@ interface Props {
   onBreak: (minutes: BreakMinutes) => void;
   onResume: () => void;
   onEnd: () => void;
+  /** Task line: picker before Start, "working on" during the session (F-29). */
+  taskSlot?: ReactNode;
+  /** Extra note under the controls (e.g. where the session lives). */
+  note?: ReactNode;
 }
 
 const button =
@@ -29,7 +33,17 @@ const button =
  * elapsed = closed segments + (now − current segment start); countdown = break end − now.
  * Nothing here ever resumes the timer by itself (R5).
  */
-export function TimerPanel({ session, now, pending, onStart, onBreak, onResume, onEnd }: Props) {
+export function TimerPanel({
+  session,
+  now,
+  pending,
+  onStart,
+  onBreak,
+  onResume,
+  onEnd,
+  taskSlot,
+  note,
+}: Props) {
   const [picking, setPicking] = useState(false);
   const phase = session ? displayPhase(session, now) : null;
   const elapsed = session ? elapsedStudyMs(session, now) : 0;
@@ -62,6 +76,7 @@ export function TimerPanel({ session, now, pending, onStart, onBreak, onResume, 
         </p>
       </div>
       <p className="text-xs text-slate-500">Study time this session (breaks never count)</p>
+      {taskSlot && <div className="mt-3">{taskSlot}</div>}
 
       {phase === 'ON_BREAK' && session?.break && (
         <div className="mt-4 rounded-md bg-amber-50 p-3">
@@ -76,8 +91,9 @@ export function TimerPanel({ session, now, pending, onStart, onBreak, onResume, 
               )}
             </span>
           </p>
-          <p className="mt-1 text-xs text-amber-800">
-            Keep StudySync open during your break. Resume becomes available when the countdown ends.
+          <p className="mt-1 text-xs text-amber-800" data-testid="break-hint">
+            Keep StudySync open during your break — closing it saves your session after 2 minutes.
+            Resume becomes available when the countdown ends.
           </p>
         </div>
       )}
@@ -143,6 +159,8 @@ export function TimerPanel({ session, now, pending, onStart, onBreak, onResume, 
           </button>
         )}
       </div>
+
+      {note && <div className="mt-3 text-xs text-slate-500">{note}</div>}
 
       {phase === 'STUDYING' && picking && (
         <BreakPicker

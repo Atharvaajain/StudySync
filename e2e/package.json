@@ -5,7 +5,8 @@
   "type": "module",
   "description": "StudySync end-to-end tests (Playwright). Pinned to the Playwright version whose browser is pre-installed in the cloud container.",
   "devDependencies": {
-    "@playwright/test": "1.63.0"
+    "@playwright/test": "1.63.0",
+    "socket.io-client": "4.8.4"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

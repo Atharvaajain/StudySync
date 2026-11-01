@@ -14,7 +14,8 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:reset": "prisma migrate reset --force",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "e2e:prepare-db": "tsx scripts/e2e-db.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",

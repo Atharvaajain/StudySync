@@ -1,11 +1,13 @@
 /**
  * E2E-0 (TESTING_STRATEGY §5.8): two real browsers in the hardcoded room, driving the real UI.
  * Covers the Phase 0 acceptance scenarios end to end and captures side-by-side screenshots
- * and per-browser videos for the Phase 0 report.
+ * and per-browser videos for the Phase 0 report. Since Phase 1 both users register real
+ * accounts first (separate browser contexts = separate cookies).
  */
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { MIN, advanceServerClock, elapsed, enterRoom, seconds } from '../helpers/app';
 
 const SHOTS = fileURLToPath(new URL('../../docs/phase-0/screenshots/', import.meta.url));
 const VIDEOS = fileURLToPath(new URL('../.artifacts/videos/', import.meta.url));
@@ -13,19 +15,11 @@ const VIDEOS = fileURLToPath(new URL('../.artifacts/videos/', import.meta.url));
 const CAPTURE = process.env.CAPTURE_SCREENSHOTS === '1';
 if (CAPTURE) mkdirSync(SHOTS, { recursive: true });
 
-const MIN = 60_000;
 /** Roadmap Phase 0 acceptance: the other browser sees a status change within 1 s. */
 const WITHIN_1S = { timeout: 1_000 };
 
-/** "MM:SS" or "H:MM:SS" → seconds */
-function seconds(text: string): number {
-  const parts = text.trim().split(':').map(Number);
-  return parts.reduce((acc, n) => acc * 60 + n, 0);
-}
-
 const member = (page: Page, name: string) =>
   page.locator(`[data-testid="member-row"][data-user-name="${name}"]`);
-const elapsed = async (page: Page) => seconds(await page.getByTestId('elapsed').innerText());
 
 test.describe.configure({ mode: 'serial' });
 
@@ -34,21 +28,6 @@ let ctxA: BrowserContext;
 let ctxB: BrowserContext;
 let alice: Page;
 let bob: Page;
-
-async function enter(context: BrowserContext, name: string): Promise<Page> {
-  const page = await context.newPage();
-  await page.goto('/');
-  await page.getByTestId('name-input').fill(name);
-  await page.getByTestId('join-button').click();
-  await expect(page.getByTestId('room-name')).toHaveText('DSA Night Study');
-  await expect(page.getByTestId('connection')).toHaveAttribute('data-connection', 'connected');
-  return page;
-}
-
-async function advanceServerClock(page: Page, ms: number): Promise<void> {
-  const res = await page.request.post('/__test__/clock', { data: { advanceMs: ms } });
-  expect(res.ok()).toBe(true);
-}
 
 /** Side-by-side screenshot of both browsers (for the report). */
 async function sideBySide(file: string, caption: string): Promise<void> {
@@ -90,8 +69,8 @@ test.afterAll(async () => {
 });
 
 test('1. two browsers join the same room and see each other', async () => {
-  alice = await enter(ctxA, 'Alice');
-  bob = await enter(ctxB, 'Bob');
+  alice = await enterRoom(ctxA, 'Alice');
+  bob = await enterRoom(ctxB, 'Bob');
   for (const page of [alice, bob]) {
     await expect(member(page, 'Alice')).toHaveAttribute('data-status', 'IDLE');
     await expect(member(page, 'Bob')).toHaveAttribute('data-status', 'IDLE');

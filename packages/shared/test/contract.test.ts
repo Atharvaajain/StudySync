@@ -1,6 +1,7 @@
 /** Schemas and display helpers (R4, R14, F-32). */
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalTimeZone,
   BREAK_DURATIONS_MINUTES,
   breakRemainingMs,
   canResume,
@@ -93,6 +94,15 @@ describe('account schemas (§17.1, §17.3)', () => {
     for (const tz of ['Mars/Olympus', 'GMT+99', '', 'x'.repeat(65)]) {
       expect(registerSchema.safeParse({ ...base, timezone: tz }).success).toBe(false);
     }
+  });
+
+  it('stores legacy browser zone ids under their current IANA name', () => {
+    // Chrome reports India as Asia/Calcutta; PostgreSQL without tz backward links rejects it.
+    const parsed = registerSchema.parse({ ...base, timezone: 'Asia/Calcutta' });
+    expect(parsed.timezone).toBe('Asia/Kolkata');
+    expect(updateProfileSchema.parse({ timezone: 'Europe/Kiev' }).timezone).toBe('Europe/Kyiv');
+    expect(canonicalTimeZone('Asia/Saigon')).toBe('Asia/Ho_Chi_Minh');
+    expect(canonicalTimeZone('America/New_York')).toBe('America/New_York');
   });
 
   it('profile updates need at least one field and reject unknown ones', () => {

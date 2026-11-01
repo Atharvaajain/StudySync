@@ -4,6 +4,39 @@
  * snapshot (D-6); these helpers only validate zones and resolve "today".
  */
 
+/**
+ * Browsers report CLDR's legacy zone ids for some places (Chrome: "Asia/Calcutta" for India).
+ * PostgreSQL builds without the tz "backward" links reject those, so every boundary stores the
+ * current IANA name instead. The rules of each pair are identical.
+ */
+const LEGACY_ZONES: Readonly<Record<string, string>> = {
+  'Africa/Asmera': 'Africa/Asmara',
+  'America/Buenos_Aires': 'America/Argentina/Buenos_Aires',
+  'America/Catamarca': 'America/Argentina/Catamarca',
+  'America/Cordoba': 'America/Argentina/Cordoba',
+  'America/Coral_Harbour': 'America/Atikokan',
+  'America/Godthab': 'America/Nuuk',
+  'America/Indianapolis': 'America/Indiana/Indianapolis',
+  'America/Jujuy': 'America/Argentina/Jujuy',
+  'America/Louisville': 'America/Kentucky/Louisville',
+  'America/Mendoza': 'America/Argentina/Mendoza',
+  'Asia/Calcutta': 'Asia/Kolkata',
+  'Asia/Katmandu': 'Asia/Kathmandu',
+  'Asia/Rangoon': 'Asia/Yangon',
+  'Asia/Saigon': 'Asia/Ho_Chi_Minh',
+  'Asia/Thimbu': 'Asia/Thimphu',
+  'Atlantic/Faeroe': 'Atlantic/Faroe',
+  'Europe/Kiev': 'Europe/Kyiv',
+  'Pacific/Enderbury': 'Pacific/Kanton',
+  'Pacific/Ponape': 'Pacific/Pohnpei',
+  'Pacific/Truk': 'Pacific/Chuuk',
+};
+
+/** The current IANA name for a zone id (legacy CLDR ids mapped, everything else unchanged). */
+export function canonicalTimeZone(tz: string): string {
+  return LEGACY_ZONES[tz] ?? tz;
+}
+
 /** True if `tz` is an IANA timezone the runtime knows (e.g. "Asia/Kolkata", "UTC"). */
 export function isValidTimeZone(tz: string): boolean {
   if (typeof tz !== 'string' || tz.length === 0 || tz.length > 64) return false;
