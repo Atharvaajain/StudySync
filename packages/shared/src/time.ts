@@ -69,3 +69,16 @@ export function addDays(localDate: string, days: number): string {
 export function daysBetween(from: string, to: string): number {
   return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 }
+
+/** ISO weekday of a calendar date: 1 = Monday … 7 = Sunday. */
+export function isoWeekday(localDate: string): number {
+  const d = new Date(`${localDate}T00:00:00.000Z`).getUTCDay();
+  return d === 0 ? 7 : d;
+}
+
+/** First day of the ISO week (Monday) or of the month that contains `localDate`. */
+export function periodStart(localDate: string, granularity: 'week' | 'month'): string {
+  return granularity === 'month'
+    ? `${localDate.slice(0, 7)}-01`
+    : addDays(localDate, 1 - isoWeekday(localDate));
+}

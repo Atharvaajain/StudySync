@@ -157,6 +157,27 @@ export interface DailyStatsDto {
   days: { date: LocalDate; soloMs: number; roomsMs: number; totalMs: number; qualified: boolean }[];
 }
 
+/** Weekly (ISO weeks, Monday start) or monthly totals of the per-day values (§6.12). */
+export interface PeriodStatsDto {
+  timezone: string;
+  granularity: 'week' | 'month';
+  periods: {
+    start: LocalDate;
+    totalMs: number;
+    soloMs: number;
+    roomsMs: number;
+    qualifiedDays: number;
+  }[];
+}
+
+/** Study time by local weekday (1 = Monday … 7 = Sunday) × hour (0–23), §6.11. */
+export interface HeatmapDto {
+  timezone: string;
+  from: LocalDate;
+  to: LocalDate;
+  cells: { weekday: number; hour: number; studyMs: number }[];
+}
+
 export interface StreakDto {
   current: number;
   longest: number;

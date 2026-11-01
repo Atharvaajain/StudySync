@@ -144,6 +144,12 @@ export const taskDeleteSchema = z.strictObject({ taskId: uuidSchema });
 // ───────────── reads (API_DESIGN §5) ─────────────
 
 export const dailyStatsQuerySchema = z.strictObject({ from: localDateSchema, to: localDateSchema });
+export const periodStatsQuerySchema = z.strictObject({
+  granularity: z.enum(['week', 'month']),
+  from: localDateSchema,
+  to: localDateSchema,
+});
+export const heatmapQuerySchema = dailyStatsQuerySchema;
 
 export const historyQuerySchema = z.strictObject({
   cursor: z.string().max(200).optional(),

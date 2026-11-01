@@ -143,8 +143,25 @@ describe('environment guard (§17.6)', () => {
     expect(() => loadEnv({ ...base, JWT_ACCESS_SECRET: 'short' })).toThrow(/JWT_ACCESS_SECRET/);
   });
 
-  it('refuses production until the pre-launch phase', () => {
-    expect(() => loadEnv({ ...base, NODE_ENV: 'production' })).toThrow(/NODE_ENV=production/);
+  it('production requires a secure configuration', () => {
+    const prod = {
+      ...base,
+      NODE_ENV: 'production',
+      JWT_ACCESS_SECRET: 'k9Qz3vR7tY1wX5bN8mL2pA6sD4fG0hJ',
+    };
+    expect(loadEnv(prod)).toMatchObject({
+      NODE_ENV: 'production',
+      COOKIE_SECURE: true,
+      BCRYPT_COST: 12,
+    });
+    expect(() => loadEnv({ ...prod, COOKIE_SECURE: 'false' })).toThrow(/COOKIE_SECURE/);
+    expect(() => loadEnv({ ...prod, BCRYPT_COST: '10' })).toThrow(/BCRYPT_COST/);
+    expect(() =>
+      loadEnv({ ...prod, JWT_ACCESS_SECRET: 'dev-only-change-me-dev-only-change-me-0123' }),
+    ).toThrow(/JWT_ACCESS_SECRET/);
+    expect(() => loadEnv({ ...prod, ENABLE_TEST_CLOCK: 'true' })).toThrow(/NODE_ENV=test/);
+    expect(() => loadEnv({ ...prod, RELAX_RATE_LIMITS: 'true' })).toThrow(/NODE_ENV=test/);
+    expect(loadEnv({ ...prod, TRUST_PROXY: '2' }).TRUST_PROXY).toBe(2);
   });
 
   it('allows test-only switches with NODE_ENV=test only', () => {

@@ -68,12 +68,18 @@ export function createHttpApp(deps: HttpAppDeps): express.Express {
   const { env, clock, scheduler, logger, db } = deps;
   const app = express();
   app.disable('x-powered-by');
+  // Behind Render / Vercel the client IP is in X-Forwarded-For (rate limits need it).
+  if (env.TRUST_PROXY > 0) app.set('trust proxy', env.TRUST_PROXY);
+  const production = env.NODE_ENV === 'production';
   app.use(
     helmet({
-      // Development builds are never served over HTTPS (local / cloud container only).
-      hsts: false,
+      // HTTPS only in production (HSTS + upgrade-insecure-requests). Local runs are plain http.
+      hsts: production ? { maxAge: 15_552_000, includeSubDomains: true } : false,
       contentSecurityPolicy: {
-        directives: { 'upgrade-insecure-requests': null, 'connect-src': ["'self'"] },
+        directives: {
+          'upgrade-insecure-requests': production ? [] : null,
+          'connect-src': ["'self'"],
+        },
       },
     }),
   );

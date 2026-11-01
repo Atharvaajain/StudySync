@@ -4,8 +4,8 @@ import { z } from 'zod';
  * Zod-validated environment (ARCHITECTURE §20). The process refuses to start on invalid config.
  *
  * Safety rules:
- * - NODE_ENV=production is refused until the pre-launch phase (DEVELOPMENT_ROADMAP Phase 5:
- *   security review, password reset, deployment). Development and test only.
+ * - NODE_ENV=production requires a secure configuration: Secure cookies, bcrypt cost ≥ 12, a
+ *   real JWT secret (not an example value), and none of the test-only switches below.
  * - The test clock (POST /__test__/clock), relaxed rate limits, other token lifetimes and a
  *   bcrypt cost below 10 are only allowed with NODE_ENV=test (§17.6).
  */
@@ -40,6 +40,11 @@ const envSchema = z
     /** 30 days (§17.1). Other values only for automated tests. */
     REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(90).default(30),
     BCRYPT_COST: z.coerce.number().int().min(4).max(15).default(12),
+    /**
+     * Reverse proxies in front of the server (Render: 1; Vercel rewrite → Render: 2). Needed so
+     * rate limits see the client IP instead of the proxy's (§17.5). 0 = connect directly.
+     */
+    TRUST_PROXY: z.coerce.number().int().min(0).max(5).default(0),
     /** `Secure` flag on the refresh cookie (§17.1). Set false only for plain-http local dev. */
     COOKIE_SECURE: z
       .enum(['true', 'false'])
@@ -48,12 +53,13 @@ const envSchema = z
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production') {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['NODE_ENV'],
-        message:
-          'StudySync is not release-ready until the pre-launch phase (Phase 5); NODE_ENV=production is refused.',
-      });
+      const refuse = (path: string, message: string) =>
+        ctx.addIssue({ code: 'custom', path: [path], message });
+      if (!env.COOKIE_SECURE) refuse('COOKIE_SECURE', 'Production requires COOKIE_SECURE=true.');
+      if (env.BCRYPT_COST < 12) refuse('BCRYPT_COST', 'Production requires BCRYPT_COST ≥ 12.');
+      if (/change-me|dev-only|test-only|e2e-only|example/i.test(env.JWT_ACCESS_SECRET)) {
+        refuse('JWT_ACCESS_SECRET', 'Production requires a real random secret, not an example.');
+      }
     }
     if (env.ENABLE_TEST_CLOCK && env.NODE_ENV !== 'test') {
       ctx.addIssue({

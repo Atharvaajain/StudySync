@@ -14,6 +14,9 @@ import {
   addDays,
   daysBetween,
   localDateOf,
+  periodStart,
+  type HeatmapDto,
+  type PeriodStatsDto,
   type DailyStatsDto,
   type StreakDto,
   type TodayDto,
@@ -54,6 +57,17 @@ function piecesCte(userId: string, now: Date, range: { from: string; to: string 
           date_trunc('day', seg.ended_at   AT TIME ZONE seg.tz),
           interval '1 day') AS d(local_day)
     )`;
+}
+
+/** from ≤ to and at most 366 days (API_DESIGN §5). Returns the span in days. */
+function assertRange(from: string, to: string): number {
+  const span = daysBetween(from, to);
+  if (span < 0 || span + 1 > STATS_MAX_RANGE_DAYS) {
+    throw new AppError('VALIDATION_ERROR', {
+      reason: `from must be ≤ to and the range at most ${STATS_MAX_RANGE_DAYS} days`,
+    });
+  }
+  return span;
 }
 
 export class StatsService {
@@ -103,12 +117,7 @@ export class StatsService {
 
   /** GET /stats/daily: zero-filled per-day totals, at most 366 days. */
   async daily(userId: string, from: string, to: string): Promise<DailyStatsDto> {
-    const span = daysBetween(from, to);
-    if (span < 0 || span + 1 > STATS_MAX_RANGE_DAYS) {
-      throw new AppError('VALIDATION_ERROR', {
-        reason: `from must be ≤ to and the range at most ${STATS_MAX_RANGE_DAYS} days`,
-      });
-    }
+    const span = assertRange(from, to);
     const timezone = await this.timezoneOf(userId);
     const byDate = new Map((await this.dayTotals(userId, from, to)).map((d) => [d.date, d]));
     const days: DailyStatsDto['days'] = [];
@@ -125,6 +134,80 @@ export class StatsService {
       });
     }
     return { timezone, days };
+  }
+
+  /**
+   * GET /stats/periods (§6.12): the same per-day values as /stats/daily (each segment split at
+   * its own timezone's midnights), grouped into ISO weeks or calendar months. Zero-filled.
+   */
+  async periods(
+    userId: string,
+    granularity: 'week' | 'month',
+    from: string,
+    to: string,
+  ): Promise<PeriodStatsDto> {
+    const { timezone, days } = await this.daily(userId, from, to);
+    const byStart = new Map<string, PeriodStatsDto['periods'][number]>();
+    for (const day of days) {
+      const start = periodStart(day.date, granularity);
+      const p = byStart.get(start) ?? {
+        start,
+        totalMs: 0,
+        soloMs: 0,
+        roomsMs: 0,
+        qualifiedDays: 0,
+      };
+      p.totalMs += day.totalMs;
+      p.soloMs += day.soloMs;
+      p.roomsMs += day.roomsMs;
+      if (day.qualified) p.qualifiedDays += 1;
+      byStart.set(start, p);
+    }
+    return { timezone, granularity, periods: [...byStart.values()] };
+  }
+
+  /**
+   * GET /stats/heatmap (§6.11): study time by local weekday × hour, each segment split at the
+   * hours of its own timezone snapshot. Total time is conserved; on a fall-back night the
+   * repeated hour is folded into one bucket.
+   */
+  async heatmap(userId: string, from: string, to: string): Promise<HeatmapDto> {
+    assertRange(from, to);
+    const timezone = await this.timezoneOf(userId);
+    const now = toDate(this.deps.clock.now());
+    const rows = await this.deps.db.$queryRaw<
+      { weekday: number; hour: number; study_ms: bigint }[]
+    >`
+      WITH seg AS (
+        SELECT s.timezone AS tz, s.started_at, COALESCE(s.ended_at, ${now}::timestamptz) AS ended_at
+        FROM study_segments s
+        WHERE s.user_id = ${userId}::uuid
+          AND s.started_at < ((${to}::date + 2)::timestamp AT TIME ZONE 'UTC')
+          AND COALESCE(s.ended_at, ${now}::timestamptz) > ((${from}::date - 1)::timestamp AT TIME ZONE 'UTC')
+      ),
+      pieces AS (
+        SELECT d.local_hour,
+               GREATEST(seg.started_at, d.local_hour AT TIME ZONE seg.tz)                  AS p_start,
+               LEAST(seg.ended_at, (d.local_hour + interval '1 hour') AT TIME ZONE seg.tz) AS p_end
+        FROM seg
+        CROSS JOIN LATERAL generate_series(
+            date_trunc('hour', seg.started_at AT TIME ZONE seg.tz),
+            date_trunc('hour', seg.ended_at   AT TIME ZONE seg.tz),
+            interval '1 hour') AS d(local_hour)
+      )
+      SELECT EXTRACT(ISODOW FROM local_hour)::int AS weekday,
+             EXTRACT(HOUR FROM local_hour)::int   AS hour,
+             SUM(EXTRACT(EPOCH FROM p_end - p_start) * 1000)::bigint AS study_ms
+      FROM pieces
+      WHERE p_end > p_start AND local_hour::date BETWEEN ${from}::date AND ${to}::date
+      GROUP BY 1, 2
+      ORDER BY 1, 2`;
+    return {
+      timezone,
+      from,
+      to,
+      cells: rows.map((r) => ({ weekday: r.weekday, hour: r.hour, studyMs: Number(r.study_ms) })),
+    };
   }
 
   /**
