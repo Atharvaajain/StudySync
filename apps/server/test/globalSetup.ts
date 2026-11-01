@@ -18,10 +18,11 @@ export default function setup(): void {
     });
   } catch (error) {
     const output = (error as { stdout?: Buffer; stderr?: Buffer }).stderr?.toString() ?? '';
-    throw new Error(
-      `prisma migrate deploy failed for the test database. Is PostgreSQL running ` +
-        `(scripts/dev-db.sh)?\n${output}`,
-      { cause: error },
-    );
+    const message =
+      'prisma migrate deploy failed for the test database. Is PostgreSQL running ' +
+      `(scripts/dev-db.sh)?\n${output}`;
+    // Printed as well: Vitest can mask errors thrown from global setup.
+    console.error(message);
+    throw new Error(message, { cause: error });
   }
 }
