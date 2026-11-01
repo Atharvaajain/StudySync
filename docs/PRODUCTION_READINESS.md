@@ -25,7 +25,7 @@
 | 13 | Through a Vercel-like proxy (static web, HTTP-only rewrites, no WebSocket) — smoke | ✅ 11 / 13, both misses expected (§6) | Rehearsal |
 | 14 | Two real browsers through that proxy: rooms, live status over long-polling (82 ms), sign-in survives reload | ✅ | Rehearsal |
 | 15 | Deployment configuration and documentation | ✅ | `render.yaml`, `deploy/`, `docs/DEPLOYMENT.md` |
-| 16 | CI on GitHub (last pushed commit) | ✅ | Actions run 41295362323 |
+| 16 | CI on GitHub (last pushed commit) | ✅ | Actions run 41296072137 (commit 8e85f3c), both jobs |
 
 ## 2. Requirement verification (highlights)
 
