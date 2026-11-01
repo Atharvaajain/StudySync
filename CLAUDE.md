@@ -10,7 +10,7 @@ Phase 0 (spike), Phase 1 (solo core), Phase 2 (rooms) and the MVP finalization
 production config, deployment preparation). **Not deployed; not launch-ready** until password
 reset and account deletion (D-4) exist. Awaiting the product owner's approval — do not start
 new work until it is given. Reports: `docs/phase-<n>/TEST_REPORT.md`; deployment:
-`docs/DEPLOYMENT.md`.
+`docs/DEPLOYMENT.md`; readiness and open blockers: `docs/PRODUCTION_READINESS.md`.
 
 ## Engineering governance (standing rules from the product owner — apply for the whole project)
 

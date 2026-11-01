@@ -5,7 +5,8 @@
  *   refresh-cookie flags and rotation, an authenticated read, Socket.IO (polling and, if the
  *   host supports it, WebSocket), and a tiny study session (start → end → summary).
  *
- *   node scripts/smoke.mjs https://your-app.example.com
+ *   node scripts/smoke.mjs https://your-app.example.com          (the web URL, e.g. Vercel)
+ *   node scripts/smoke.mjs https://your-api.onrender.com --api-only  (the backend directly)
  *
  * It never touches existing data and never needs secrets. The throwaway account stays (there is
  * no account deletion before the pre-launch phase, D-4); its email is printed at the end.
@@ -14,6 +15,8 @@ import { randomUUID } from 'node:crypto';
 import { io } from 'socket.io-client';
 
 const base = (process.argv[2] ?? '').replace(/\/$/, '');
+// --api-only: check a backend that doesn't serve the web app (e.g. the Render URL directly).
+const apiOnly = process.argv.includes('--api-only');
 if (!/^https?:\/\//.test(base)) {
   console.error('Usage: node scripts/smoke.mjs <base-url>');
   process.exit(2);
@@ -32,10 +35,12 @@ const health = await fetch(`${base}/api/v1/health`).catch((e) => {
 check('GET /api/v1/health', health.ok, String(health.status));
 const ready = await fetch(`${base}/api/v1/health/ready`);
 check('GET /api/v1/health/ready (database)', ready.ok, String(ready.status));
-const page = await fetch(`${base}/`);
-check('web app served at /', page.ok && (await page.text()).includes('<div id="root">'));
-const deep = await fetch(`${base}/history`);
-check('SPA fallback for /history', deep.ok);
+const page = apiOnly ? health : await fetch(`${base}/`);
+if (!apiOnly) {
+  check('web app served at /', page.ok && (await page.text()).includes('<div id="root">'));
+  const deep = await fetch(`${base}/history`);
+  check('SPA fallback for /history', deep.ok);
+}
 const csp = page.headers.get('content-security-policy') ?? '';
 check('Content-Security-Policy header', csp.includes("default-src 'self'"), csp.slice(0, 60));
 if (https) {

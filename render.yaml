@@ -1,5 +1,6 @@
-# Render Blueprint — one web service: API + Socket.IO + the built web app on ONE origin
-# (DEVELOPMENT_ROADMAP 5.6, "same-origin web + API"). Database: Neon (DATABASE_URL).
+# Render Blueprint — the StudySync backend (REST API + Socket.IO + deadline sweeper).
+# The web app is served by Vercel, which rewrites /api and /socket.io here, so the browser still
+# sees ONE origin (DEVELOPMENT_ROADMAP 5.6). Database: Neon (DATABASE_URL).
 # Not yet verified on Render: see docs/DEPLOYMENT.md before using it.
 services:
   - type: web
@@ -7,7 +8,8 @@ services:
     runtime: node
     # One instance only: presence, rate limits and the sweeper's lease are per process (§22).
     numInstances: 1
-    buildCommand: npm ci --include=dev && npm run build
+    # Dev dependencies hold the Prisma CLI (migrations, client generation) and esbuild.
+    buildCommand: npm ci --include=dev && npm run build -w @studysync/server
     # Applies committed migrations only (never resets). Needs a plan with pre-deploy commands;
     # otherwise prefix the start command with `npm run db:deploy -w @studysync/server && `.
     preDeployCommand: npm run db:deploy -w @studysync/server
@@ -20,10 +22,10 @@ services:
         value: '22'
       - key: HOST
         value: 0.0.0.0
-      - key: STATIC_DIR
-        value: apps/web/dist
+      # Vercel's rewrite proxy + Render's load balancer. Use 1 if you serve the web app from
+      # Render instead (STATIC_DIR=apps/web/dist, build with `npm run build`).
       - key: TRUST_PROXY
-        value: '1'
+        value: '2'
       - key: LOG_LEVEL
         value: info
       - key: DATABASE_URL

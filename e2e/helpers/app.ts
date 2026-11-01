@@ -8,13 +8,14 @@ export const PASSWORD = 'correct horse battery staple';
 export const uniqueEmail = (name: string) =>
   `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${randomUUID().slice(0, 8)}@example.com`;
 
-/** Register through the UI; ends on the dashboard, connected. */
+/** Register through the UI; ends signed in and connected (on the dashboard by default). */
 export async function registerViaUi(
   page: Page,
   name: string,
   email: string = uniqueEmail(name),
+  options: { navigate?: boolean; path?: string } = {},
 ): Promise<string> {
-  await page.goto('/register');
+  if (options.navigate !== false || options.path) await page.goto(options.path ?? '/register');
   await page.getByLabel('Name').fill(name);
   await page.getByLabel('Email').fill(email);
   await page.getByLabel(/^Password/).fill(PASSWORD);

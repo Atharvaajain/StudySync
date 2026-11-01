@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionDto, TaskDto } from '@studysync/shared';
 import { shouldNotifyBreakOver } from '../src/lib/breakNotification';
+import { safeNext } from '../src/lib/safeNext';
 import { acceptSession } from '../src/realtime/sessionGuard';
 import { sortTasks } from '../src/realtime/useTasks';
 
@@ -75,6 +76,23 @@ describe('break-end notification (roadmap 4.3)', () => {
   it('needs permission', () => {
     for (const permission of ['default', 'denied', 'unsupported'] as const) {
       expect(shouldNotifyBreakOver({ ...base, permission })).toBe(false);
+    }
+  });
+});
+
+describe('safeNext (no open redirect after login)', () => {
+  it('keeps in-app paths and rejects everything else', () => {
+    expect(safeNext('/join/DSA7K2')).toBe('/join/DSA7K2');
+    expect(safeNext('/rooms/x?y=1')).toBe('/rooms/x?y=1');
+    for (const bad of [
+      null,
+      '',
+      'https://evil.example',
+      '//evil.example',
+      '/\\evil.example',
+      'join/X',
+    ]) {
+      expect(safeNext(bad)).toBe('/');
     }
   });
 });

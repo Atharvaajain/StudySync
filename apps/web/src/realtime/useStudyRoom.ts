@@ -19,6 +19,8 @@ export interface RoomState {
   room: RoomDto | null;
   members: Record<string, MemberStatusDto>;
   error: string | null;
+  /** Code of the last join error (NOT_FOUND = not a member / no such room). */
+  errorCode: string | null;
 }
 
 type Action =
@@ -26,9 +28,15 @@ type Action =
   | { type: 'left' }
   | { type: 'member'; member: MemberStatusDto }
   | { type: 'member_offline'; userId: string }
-  | { type: 'error'; error: string | null };
+  | { type: 'error'; error: string | null; code?: string | null };
 
-const initialState: RoomState = { inRoom: false, room: null, members: {}, error: null };
+const initialState: RoomState = {
+  inRoom: false,
+  room: null,
+  members: {},
+  error: null,
+  errorCode: null,
+};
 
 function mergeMember(
   members: Record<string, MemberStatusDto>,
@@ -46,7 +54,7 @@ function reducer(state: RoomState, action: Action): RoomState {
       for (const m of action.members) members = mergeMember(members, m);
       // Keep any newer pushes that arrived before the snapshot.
       for (const m of Object.values(state.members)) members = mergeMember(members, m);
-      return { ...state, inRoom: true, room: action.room, members, error: null };
+      return { ...state, inRoom: true, room: action.room, members, error: null, errorCode: null };
     }
     case 'left':
       return { ...state, inRoom: false };
@@ -69,7 +77,7 @@ function reducer(state: RoomState, action: Action): RoomState {
       };
     }
     case 'error':
-      return { ...state, error: action.error };
+      return { ...state, error: action.error, errorCode: action.code ?? null };
   }
 }
 
@@ -87,7 +95,7 @@ export function useStudyRoom(roomId: string) {
       dispatch({ type: 'joined', room: res.data.room, members: res.data.members });
       applySession(res.data.session);
     } else {
-      dispatch({ type: 'error', error: res.error.message });
+      dispatch({ type: 'error', error: res.error.message, code: res.error.code });
     }
   }, [call, roomId, applySession]);
 

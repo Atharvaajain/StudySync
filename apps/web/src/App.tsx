@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary, Loading } from './components/ui';
@@ -9,7 +9,25 @@ import { JoinPage } from './pages/JoinPage';
 import { RoomPage } from './pages/RoomPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { SummaryPage } from './pages/SummaryPage';
+import { safeNext } from './lib/safeNext';
 import { RealtimeProvider } from './realtime/RealtimeProvider';
+
+/** Anonymous visitor on a protected page (e.g. an invite link): log in, then come back. */
+function ToLogin() {
+  const location = useLocation();
+  const next = `${location.pathname}${location.search}`;
+  return (
+    <Navigate to={next === '/' ? '/login' : `/login?next=${encodeURIComponent(next)}`} replace />
+  );
+}
+
+/** Signed in on /login or /register (or an unknown path): continue to `next`, else home. */
+function AfterLogin() {
+  const location = useLocation();
+  const isAuthPage = location.pathname === '/login' || location.pathname === '/register';
+  const next = isAuthPage ? safeNext(new URLSearchParams(location.search).get('next')) : '/';
+  return <Navigate to={next} replace />;
+}
 
 /** Routes (ARCHITECTURE §16.1). Everything except login/register needs an account. */
 function AppRoutes() {
@@ -26,7 +44,7 @@ function AppRoutes() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<ToLogin />} />
       </Routes>
     );
   }
@@ -41,7 +59,7 @@ function AppRoutes() {
           <Route path="sessions/:sessionId" element={<SummaryPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<AfterLogin />} />
       </Routes>
     </RealtimeProvider>
   );

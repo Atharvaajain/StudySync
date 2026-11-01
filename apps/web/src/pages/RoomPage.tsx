@@ -124,7 +124,9 @@ function Room({ roomId }: { roomId: string }) {
           data-testid="room-unavailable"
         >
           <p className="text-slate-700">
-            This room doesn’t exist, or you are not a member. Ask a member for the room code.
+            {state.errorCode === 'NOT_FOUND'
+              ? 'This room doesn’t exist, or you are not a member. Ask a member for the room code.'
+              : state.error}
           </p>
           <Link to="/" className="mt-3 inline-block text-indigo-700 underline">
             Back to the dashboard

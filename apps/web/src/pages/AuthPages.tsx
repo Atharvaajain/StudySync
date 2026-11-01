@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
 import { canonicalTimeZone } from '@studysync/shared';
 import { useAuth } from '../auth/AuthContext';
 import { ErrorNote, inputClass, primaryButton } from '../components/ui';
@@ -33,6 +33,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { search } = useLocation(); // keeps ?next= (e.g. an invite link) across login/register
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -80,7 +81,7 @@ export function LoginPage() {
       </form>
       <p className="mt-4 text-sm text-slate-600">
         New here?{' '}
-        <Link to="/register" className="text-indigo-700 underline">
+        <Link to={`/register${search}`} className="text-indigo-700 underline">
           Create an account
         </Link>
       </p>
@@ -94,6 +95,7 @@ export function RegisterPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [timezone] = useState(detectTimezone);
+  const { search } = useLocation();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -159,7 +161,7 @@ export function RegisterPage() {
       </form>
       <p className="mt-4 text-sm text-slate-600">
         Already have an account?{' '}
-        <Link to="/login" className="text-indigo-700 underline">
+        <Link to={`/login${search}`} className="text-indigo-700 underline">
           Log in
         </Link>
       </p>

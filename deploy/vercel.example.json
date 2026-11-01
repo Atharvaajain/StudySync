@@ -1,5 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build -w @studysync/web",
+  "outputDirectory": "apps/web/dist",
+  "framework": null,
   "rewrites": [
     {
       "source": "/api/:path*",
@@ -9,7 +13,10 @@
       "source": "/socket.io/:path*",
       "destination": "https://YOUR-RENDER-SERVICE.onrender.com/socket.io/:path*"
     },
-    { "source": "/((?!api/|socket\\.io/|assets/).*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api/|socket\\.io/|assets/).*)",
+      "destination": "/index.html"
+    }
   ],
   "headers": [
     {
@@ -19,9 +26,18 @@
           "key": "Content-Security-Policy",
           "value": "default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-ancestors 'self'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests"
         },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "no-referrer" },
-        { "key": "X-Frame-Options", "value": "SAMEORIGIN" }
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "SAMEORIGIN"
+        }
       ]
     }
   ]

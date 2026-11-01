@@ -13,7 +13,7 @@ monthly charts, an activity heatmap, a break-end browser notification, a respons
 **Not deployed yet, and not ready for a public launch:** password reset and account deletion
 (decision D-4) are still missing. Reports: [MVP finalization](./docs/phase-3/TEST_REPORT.md) ·
 [Phase 2](./docs/phase-2/TEST_REPORT.md) · [Phase 1](./docs/phase-1/TEST_REPORT.md) ·
-[Phase 0](./docs/phase-0/TEST_REPORT.md) · **[Deployment guide](./docs/DEPLOYMENT.md)**.
+[Phase 0](./docs/phase-0/TEST_REPORT.md) · **[Deployment guide](./docs/DEPLOYMENT.md)** · **[Production readiness review](./docs/PRODUCTION_READINESS.md)**.
 
 ---
 
