@@ -76,4 +76,5 @@ jobs:
         with:
           name: e2e-artifacts
           path: e2e/.artifacts
+          include-hidden-files: true # e2e/.artifacts is a dot-directory (skipped by default)
           retention-days: 7

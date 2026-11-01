@@ -6,7 +6,13 @@
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { MIN, advanceServerClock, createRoomViaUi, registerViaUi } from '../helpers/app';
+import {
+  MIN,
+  advanceServerClock,
+  advanceServerClockPastTokenExpiry,
+  createRoomViaUi,
+  registerViaUi,
+} from '../helpers/app';
 
 const SHOTS = fileURLToPath(new URL('../../docs/phase-3/screenshots/', import.meta.url));
 const CAPTURE = process.env.CAPTURE_SCREENSHOTS === '1';
@@ -26,10 +32,13 @@ test('charts and heatmap show exactly the recorded study (breaks excluded)', asy
   await registerViaUi(page, 'Charts');
   await page.getByTestId('start-study').click();
   await expect(phase(page)).toHaveAttribute('data-phase', 'STUDYING');
-  await advanceServerClock(page, 40 * MIN);
+  await advanceServerClockPastTokenExpiry(page, 40 * MIN);
   await page.getByTestId('take-break').click();
   await page.getByTestId('break-15').click();
+  await expect(phase(page)).toHaveAttribute('data-phase', 'ON_BREAK'); // taken at minute 40
   await advanceServerClock(page, 15 * MIN);
+  await expect(phase(page)).toHaveAttribute('data-phase', 'BREAK_OVER');
+  await expect(page.getByTestId('connection')).toHaveAttribute('data-connection', 'connected');
   await page.getByTestId('end-study').click();
   await expect(page.getByTestId('session-summary')).toBeVisible();
 

@@ -68,6 +68,20 @@ export async function advanceServerClock(page: Page, ms: number): Promise<number
   return Date.parse(((await res.json()) as { now: string }).now);
 }
 
+/**
+ * A jump past the 15-minute access-token lifetime makes the server expire the socket (RT-9);
+ * the client then refreshes its token and reconnects by itself. Wait for that before the
+ * test goes on: another jump during the reconnect would (correctly) run out the 2-minute
+ * disconnect grace and auto-save the session.
+ */
+export async function advanceServerClockPastTokenExpiry(page: Page, ms: number): Promise<number> {
+  const refreshed = page.waitForResponse((r) => r.url().endsWith('/api/v1/auth/refresh') && r.ok());
+  const now = await advanceServerClock(page, ms);
+  await refreshed;
+  await expect(page.getByTestId('connection')).toHaveAttribute('data-connection', 'connected');
+  return now;
+}
+
 /** "MM:SS" or "H:MM:SS" → seconds */
 export function seconds(text: string): number {
   const parts = text.trim().split(':').map(Number);
