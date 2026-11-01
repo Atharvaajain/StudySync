@@ -17,9 +17,15 @@ interface Props {
     patch: { title: string; description: string | null; dueDate: string | null },
   ) => Promise<boolean>;
   onDelete: (taskId: string) => Promise<void>;
+  /** Card title ("My tasks" or "Room tasks"). */
+  heading?: string;
+  /** Room tasks: show who added / completed each task. */
+  showPeople?: boolean;
+  /** Room tasks: only the task creator or the room creator may delete (I-16). */
+  canDelete?: (task: TaskDto) => boolean;
 }
 
-/** Personal tasks (F-25–F-27). Tasks never affect study time (F-28). */
+/** Personal or room tasks (F-25–F-27, R8). Tasks never affect study time (F-28). */
 export function TaskList({
   tasks,
   error,
@@ -28,6 +34,9 @@ export function TaskList({
   onToggle,
   onUpdate,
   onDelete,
+  heading = 'My tasks',
+  showPeople = false,
+  canDelete = () => true,
 }: Props) {
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
@@ -50,7 +59,7 @@ export function TaskList({
   };
 
   return (
-    <Card title="My tasks" testId="tasks">
+    <Card title={heading} testId="tasks">
       <ErrorNote message={error} onDismiss={onDismissError} />
       <form onSubmit={(e) => void submit(e)} className="mt-2 space-y-2" aria-label="Add a task">
         <div className="flex gap-2">
@@ -129,6 +138,12 @@ export function TaskList({
                     {task.description && (
                       <span className="block text-xs text-slate-500">{task.description}</span>
                     )}
+                    {showPeople && (
+                      <span className="block text-xs text-slate-400" data-testid="task-people">
+                        added by {task.createdBy.name}
+                        {task.completedBy ? ` · ✓ by ${task.completedBy.name}` : ''}
+                      </span>
+                    )}
                   </span>
                 </label>
                 <span className="flex gap-2 text-xs">
@@ -139,14 +154,16 @@ export function TaskList({
                   >
                     Edit
                   </button>
-                  <button
-                    type="button"
-                    data-testid="task-delete"
-                    className="text-red-700 underline"
-                    onClick={() => void onDelete(task.id)}
-                  >
-                    Delete
-                  </button>
+                  {canDelete(task) && (
+                    <button
+                      type="button"
+                      data-testid="task-delete"
+                      className="text-red-700 underline"
+                      onClick={() => void onDelete(task.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </span>
               </li>
             ),

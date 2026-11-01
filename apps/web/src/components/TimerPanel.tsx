@@ -104,6 +104,12 @@ export function TimerPanel({
           className="mt-4 rounded-md bg-slate-100 p-3 text-sm text-slate-800"
         >
           Break over — your timer is paused until you click <strong>Resume</strong>.
+          {session?.autoSaveAt && (
+            <span className="block text-xs text-slate-600" data-testid="idle-countdown">
+              Auto-saving in {formatCountdown(Math.max(0, Date.parse(session.autoSaveAt) - now))}{' '}
+              unless you resume.
+            </span>
+          )}
         </p>
       )}
 

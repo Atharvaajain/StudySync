@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import {
-  PROTOTYPE_ROOM,
+  type RoomDto,
   type SessionSummaryDto,
   type StreakDto,
   type TodayDto,
@@ -10,8 +10,9 @@ import { SessionSummary } from '../components/SessionSummary';
 import { StreakCard, TodayCard } from '../components/StatsCards';
 import { TaskList } from '../components/TaskList';
 import { TimerPanel } from '../components/TimerPanel';
-import { Card, ErrorNote } from '../components/ui';
-import { api } from '../lib/api';
+import { RoomsPanel } from '../components/RoomsPanel';
+import { ErrorNote, inputClass } from '../components/ui';
+import { api, errorMessage } from '../lib/api';
 import { useNow } from '../lib/useNow';
 import { useRealtime } from '../realtime/RealtimeProvider';
 import { useTasks } from '../realtime/useTasks';
@@ -44,6 +45,55 @@ function useDashboardStats() {
     return () => window.clearInterval(id);
   }, [load]);
   return { today, streak };
+}
+
+/**
+ * "Study with friends" (F-12): create a room mid-study and open it. Entering the room moves the
+ * solo session into it (join_room, row 11) — the timer continues, nothing resets.
+ */
+function StudyWithFriends() {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  if (!open) {
+    return (
+      <button
+        type="button"
+        data-testid="study-with-friends"
+        className="text-indigo-700 underline"
+        onClick={() => setOpen(true)}
+      >
+        Study with friends
+      </button>
+    );
+  }
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        api<RoomDto>('/rooms', { method: 'POST', body: { name } })
+          .then((room) => navigate(`/rooms/${room.id}`))
+          .catch((err: unknown) => setError(errorMessage(err)));
+      }}
+    >
+      <input
+        aria-label="New room name"
+        data-testid="friends-room-name"
+        className={`${inputClass} w-56`}
+        placeholder="Room name"
+        maxLength={60}
+        required
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <button type="submit" data-testid="friends-create" className="text-indigo-700 underline">
+        Create room and move my session
+      </button>
+      {error && <span className="text-red-700">{error}</span>}
+    </form>
+  );
 }
 
 export function DashboardPage() {
@@ -126,8 +176,13 @@ export function DashboardPage() {
               </Link>
               . Resume it from the room.
             </span>
+          ) : session ? (
+            <span className="flex flex-wrap items-center gap-3">
+              <span>Solo session. Your study time is always yours.</span>
+              <StudyWithFriends />
+            </span>
           ) : (
-            'Solo session. Your study time is always yours.'
+            'Your study time is always yours.'
           )
         }
       />
@@ -144,21 +199,7 @@ export function DashboardPage() {
         onUpdate={tasks.update}
         onDelete={tasks.remove}
       />
-      <Card title="Rooms">
-        <p className="text-sm text-slate-600">
-          Study next to others — everyone keeps their own timer.{' '}
-          <Link
-            to={`/rooms/${PROTOTYPE_ROOM.id}`}
-            data-testid="open-room"
-            className="font-semibold text-indigo-700 underline"
-          >
-            Open {PROTOTYPE_ROOM.name}
-          </Link>
-        </p>
-        <p className="mt-1 text-xs text-slate-400">
-          Creating and joining your own rooms arrives in the next phase.
-        </p>
-      </Card>
+      <RoomsPanel />
     </div>
   );
 }

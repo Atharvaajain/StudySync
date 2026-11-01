@@ -1,6 +1,8 @@
 /**
- * Personal tasks (F-25–F-27): read over REST, changed over the socket, kept in sync across my
- * devices by `personal_task_updated`. Every task carries a version; older copies are dropped.
+ * Tasks (F-25–F-27, R8): personal (`roomId` null) or a room's shared list. Read over REST,
+ * changed over the socket, kept in sync by `personal_task_updated` (my devices) or
+ * `room_task_updated` (everyone present in the room). Every task carries a version; older
+ * copies are dropped.
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { AckResponse, TaskDto } from '@studysync/shared';
@@ -27,7 +29,7 @@ export function sortTasks(tasks: TaskDto[]): TaskDto[] {
   });
 }
 
-export function useTasks() {
+export function useTasks(roomId: string | null = null) {
   const { socket, call } = useRealtime();
   const [tasks, setTasks] = useState<TaskDto[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -35,13 +37,13 @@ export function useTasks() {
 
   const reload = useCallback(async () => {
     try {
-      const res = await api<{ items: TaskDto[] }>('/tasks');
+      const res = await api<{ items: TaskDto[] }>(roomId ? `/rooms/${roomId}/tasks` : '/tasks');
       setTasks(res.items);
       setLoaded(true);
     } catch (e) {
       setError(errorMessage(e));
     }
-  }, []);
+  }, [roomId]);
 
   useEffect(() => {
     void reload();
@@ -53,7 +55,9 @@ export function useTasks() {
       action: 'added' | 'updated' | 'deleted';
       task?: TaskDto;
       taskId: string;
+      roomId?: string;
     }) => {
+      if ((p.roomId ?? null) !== roomId) return;
       setTasks((current) =>
         p.action === 'deleted' || !p.task
           ? current.filter((t) => t.id !== p.taskId)
@@ -62,13 +66,14 @@ export function useTasks() {
     };
     // Changes made while disconnected arrive with the next full read.
     const onReconnect = () => void reload();
-    socket.on('personal_task_updated', onUpdate);
+    const event = roomId ? 'room_task_updated' : 'personal_task_updated';
+    socket.on(event, onUpdate);
     socket.io.on('reconnect', onReconnect);
     return () => {
-      socket.off('personal_task_updated', onUpdate);
+      socket.off(event, onUpdate);
       socket.io.off('reconnect', onReconnect);
     };
-  }, [socket, reload]);
+  }, [socket, reload, roomId]);
 
   const handle = useCallback(async <T>(res: AckResponse<T>): Promise<T | null> => {
     if (res.ok) {
@@ -83,11 +88,11 @@ export function useTasks() {
 
   const add = useCallback(
     async (input: { title: string; description?: string | null; dueDate?: string | null }) => {
-      const data = await handle(await call('task_add', { id: newUuid(), roomId: null, ...input }));
+      const data = await handle(await call('task_add', { id: newUuid(), roomId, ...input }));
       if (data) setTasks((ts) => upsert(ts, data.task));
       return data?.task ?? null;
     },
-    [call, handle],
+    [call, handle, roomId],
   );
 
   const toggle = useCallback(

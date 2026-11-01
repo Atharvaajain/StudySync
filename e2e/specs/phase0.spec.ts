@@ -2,12 +2,20 @@
  * E2E-0 (TESTING_STRATEGY §5.8): two real browsers in the hardcoded room, driving the real UI.
  * Covers the Phase 0 acceptance scenarios end to end and captures side-by-side screenshots
  * and per-browser videos for the Phase 0 report. Since Phase 1 both users register real
- * accounts first (separate browser contexts = separate cookies).
+ * accounts (separate browser contexts = separate cookies); since Phase 2 Alice creates the room
+ * and Bob joins it by code.
  */
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { MIN, advanceServerClock, elapsed, enterRoom, seconds } from '../helpers/app';
+import {
+  MIN,
+  advanceServerClock,
+  createRoomViaUi,
+  elapsed,
+  joinRoomViaUi,
+  seconds,
+} from '../helpers/app';
 
 const SHOTS = fileURLToPath(new URL('../../docs/phase-0/screenshots/', import.meta.url));
 const VIDEOS = fileURLToPath(new URL('../.artifacts/videos/', import.meta.url));
@@ -69,8 +77,10 @@ test.afterAll(async () => {
 });
 
 test('1. two browsers join the same room and see each other', async () => {
-  alice = await enterRoom(ctxA, 'Alice');
-  bob = await enterRoom(ctxB, 'Bob');
+  // Since Phase 2 the room is a real room: Alice creates it, Bob joins with its code.
+  const created = await createRoomViaUi(ctxA, 'Alice', 'DSA Night Study');
+  alice = created.page;
+  bob = await joinRoomViaUi(ctxB, 'Bob', created.code);
   for (const page of [alice, bob]) {
     await expect(member(page, 'Alice')).toHaveAttribute('data-status', 'IDLE');
     await expect(member(page, 'Bob')).toHaveAttribute('data-status', 'IDLE');

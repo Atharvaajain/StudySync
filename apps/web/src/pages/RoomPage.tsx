@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { displayPhase, uuidSchema } from '@studysync/shared';
 import { MembersList } from '../components/MembersList';
+import { TaskList } from '../components/TaskList';
+import { TodayInRoom } from '../components/TodayInRoom';
 import { SessionSummary } from '../components/SessionSummary';
 import { TimerPanel } from '../components/TimerPanel';
 import { ErrorNote } from '../components/ui';
 import { useAuth } from '../auth/AuthContext';
 import { useNow } from '../lib/useNow';
 import { useStudyRoom } from '../realtime/useStudyRoom';
+import { useTasks } from '../realtime/useTasks';
 import { useTimer } from '../realtime/useTimer';
 import type { SessionSummaryDto } from '@studysync/shared';
 
@@ -18,7 +21,10 @@ const PHASE_ANNOUNCEMENT = {
   BREAK_OVER: 'Break over. Click Resume when you are ready.',
 } as const;
 
-/** The room screen (Phase 0 prototype room): presence and statuses, your own timer. */
+/**
+ * The room screen (F-22, ARCHITECTURE §16.3): members with their own statuses, shared room
+ * tasks, YOUR timer and Today in this room. There is no room timer (R2).
+ */
 export function RoomPage() {
   const { roomId = '' } = useParams();
   if (!uuidSchema.safeParse(roomId).success) {
@@ -31,7 +37,15 @@ function Room({ roomId }: { roomId: string }) {
   const { user } = useAuth();
   const { state, join, leave, dismissError } = useStudyRoom(roomId);
   const timer = useTimer();
+  const tasks = useTasks(roomId);
   const now = useNow();
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = (text: string, what: string) => {
+    void navigator.clipboard?.writeText(text).then(
+      () => setCopied(what),
+      () => setCopied(null),
+    );
+  };
   const [summary, setSummary] = useState<SessionSummaryDto | null>(null);
   const members = useMemo(() => Object.values(state.members), [state.members]);
   const session = timer.session;
@@ -54,12 +68,35 @@ function Room({ roomId }: { roomId: string }) {
           <h1 className="text-2xl font-bold text-slate-900" data-testid="room-name">
             {state.room?.name ?? 'Room'}
           </h1>
-          <p className="text-sm text-slate-500">
-            Code:{' '}
-            <span className="font-mono font-semibold tracking-wider">
-              {state.room?.code ?? '—'}
+          <p className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
+            <span>
+              Code:{' '}
+              <span className="font-mono font-semibold tracking-wider" data-testid="room-code">
+                {state.room?.code ?? '—'}
+              </span>
             </span>
-            {' · '}You are <strong className="text-slate-700">{user?.name}</strong>
+            {state.room && (
+              <>
+                <button
+                  type="button"
+                  className="text-indigo-700 underline"
+                  onClick={() => copy(state.room!.code, 'code')}
+                >
+                  Copy code
+                </button>
+                <button
+                  type="button"
+                  className="text-indigo-700 underline"
+                  onClick={() => copy(`${window.location.origin}/join/${state.room!.code}`, 'link')}
+                >
+                  Copy invite link
+                </button>
+                {copied && <span className="text-emerald-700">Copied {copied}.</span>}
+              </>
+            )}
+            <span>
+              · You are <strong className="text-slate-700">{user?.name}</strong>
+            </span>
           </p>
         </div>
         {state.inRoom && (
@@ -118,6 +155,19 @@ function Room({ roomId }: { roomId: string }) {
             }
           />
           <MembersList members={members} myUserId={user?.id ?? ''} now={now} />
+          <TaskList
+            heading="Room tasks"
+            tasks={tasks.tasks}
+            error={tasks.error}
+            onDismissError={tasks.clearError}
+            onAdd={tasks.add}
+            onToggle={tasks.toggle}
+            onUpdate={tasks.update}
+            onDelete={tasks.remove}
+            showPeople
+            canDelete={(t) => t.createdBy.id === user?.id || state.room?.isCreator === true}
+          />
+          <TodayInRoom roomId={roomId} now={now} />
           <p className="text-center text-xs text-slate-400">
             Everyone has their own timer. A break or a departure never affects anyone else.
           </p>

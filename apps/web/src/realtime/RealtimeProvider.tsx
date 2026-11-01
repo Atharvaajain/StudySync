@@ -20,12 +20,13 @@ import type { ReactNode } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import type {
   AckResponse,
+  AutoSavedNotice,
   ClientToServerEvents,
   ServerToClientEvents,
   SessionCause,
   SessionDto,
 } from '@studysync/shared';
-import { accessToken, onAuthChange, refreshSession } from '../lib/api';
+import { accessToken, api, onAuthChange, refreshSession } from '../lib/api';
 import { serverClock } from '../lib/serverClock';
 import { acceptSession } from './sessionGuard';
 
@@ -50,6 +51,9 @@ export interface RealtimeValue {
   ): Promise<AckResponse<AckData<E>>>;
   /** Apply a session from an ack or a rejection's `details.session` (version-guarded). */
   applySession(session: SessionDto | null, cause?: SessionCause): void;
+  /** An unseen session the server saved on its own (disconnect / idle), F-40. */
+  lastAutoSaved: AutoSavedNotice | null;
+  dismissAutoSaved(): void;
 }
 
 const RealtimeContext = createContext<RealtimeValue | null>(null);
@@ -67,6 +71,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     revision: number;
   }>({ session: null, cause: null, revision: 0 });
   const ended = useRef(new Set<string>());
+  const [lastAutoSaved, setLastAutoSaved] = useState<AutoSavedNotice | null>(null);
 
   const applySession = useCallback((incoming: SessionDto | null, cause?: SessionCause) => {
     setSessionState((current) => {
@@ -126,6 +131,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     s.on('session_state', (payload) => {
       serverClock.samplePush(payload.serverNow);
       applySession(payload.session, payload.cause);
+      setLastAutoSaved(payload.lastAutoSaved);
     });
 
     const unsubscribe = onAuthChange((auth) => {
@@ -176,6 +182,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     [socket],
   );
 
+  const dismissAutoSaved = useCallback(() => {
+    setLastAutoSaved((notice) => {
+      if (notice) {
+        void api(`/sessions/${notice.sessionId}/summary-seen`, { method: 'POST' }).catch(
+          () => undefined,
+        );
+      }
+      return null;
+    });
+  }, []);
+
   const value = useMemo<RealtimeValue>(
     () => ({
       connection,
@@ -186,8 +203,19 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       socket,
       call,
       applySession,
+      lastAutoSaved,
+      dismissAutoSaved,
     }),
-    [connection, connectionError, sessionState, socket, call, applySession],
+    [
+      connection,
+      connectionError,
+      sessionState,
+      socket,
+      call,
+      applySession,
+      lastAutoSaved,
+      dismissAutoSaved,
+    ],
   );
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;
 }

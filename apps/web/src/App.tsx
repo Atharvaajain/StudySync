@@ -4,6 +4,7 @@ import { AppShell } from './components/AppShell';
 import { LoginPage, RegisterPage } from './pages/AuthPages';
 import { DashboardPage } from './pages/DashboardPage';
 import { HistoryPage } from './pages/HistoryPage';
+import { JoinPage } from './pages/JoinPage';
 import { RoomPage } from './pages/RoomPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { SummaryPage } from './pages/SummaryPage';
@@ -34,6 +35,7 @@ function AppRoutes() {
         <Route element={<AppShell />}>
           <Route index element={<DashboardPage />} />
           <Route path="rooms/:roomId" element={<RoomPage />} />
+          <Route path="join/:code" element={<JoinPage />} />
           <Route path="history" element={<HistoryPage />} />
           <Route path="sessions/:sessionId" element={<SummaryPage />} />
           <Route path="settings" element={<SettingsPage />} />
