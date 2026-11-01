@@ -166,13 +166,18 @@ test('5. Alice resumes only after the break expires — never automatically', as
 });
 
 test('6. refresh while studying keeps the same elapsed time', async () => {
+  // Bob's page last synced its clock before test 5's 5-minute server-clock jump (made through
+  // Alice; pages resync every 30 s). A first reload syncs it, so "before" is the server's value.
+  await bob.reload();
+  await expect.poll(() => elapsed(bob)).toBeGreaterThanOrEqual(5 * 60); // Bob studied through it
   const before = await elapsed(bob);
   const t0 = Date.now();
   await bob.reload();
   await expect(bob.getByTestId('timer-phase')).toHaveAttribute('data-phase', 'STUDYING');
+  // The display picks up the freshly synced clock on its next 250 ms tick.
+  await expect.poll(() => elapsed(bob)).toBeGreaterThanOrEqual(before);
   const after = await elapsed(bob);
   const realSeconds = Math.ceil((Date.now() - t0) / 1000);
-  expect(after).toBeGreaterThanOrEqual(before);
   expect(after).toBeLessThanOrEqual(before + realSeconds + 1);
 });
 
